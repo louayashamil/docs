@@ -35,7 +35,12 @@ switch ($action) {
 
 function handleLogin(): void
 {
-    $data = getInputJSON();
+    $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+    if (strpos($contentType, 'multipart/form-data') !== false || strpos($contentType, 'application/x-www-form-urlencoded') !== false) {
+        $data = $_POST;
+    } else {
+        $data = getInputJSON();
+    }
     $email = trim($data['email'] ?? '');
     $password = $data['password'] ?? '';
 
@@ -65,12 +70,11 @@ function handleLogin(): void
         jsonResponse(['error' => 'Email ou mot de passe incorrect'], 401);
     }
 
-    if ($user['status'] === 'suspended') {
+    if ($user['status'] === 'suspended' || $user['role'] === 'suspended') {
         jsonResponse(['error' => 'Votre compte a été suspendu'], 403);
     }
-    if ($user['status'] === 'pending' || $user['role'] === 'pending') {
-        jsonResponse(['error' => 'Votre compte est en attente de validation'], 403);
-    }
+
+    $isPending = ($user['status'] === 'pending' || $user['role'] === 'pending');
 
     // Create session
     startSecureSession();
@@ -91,6 +95,7 @@ function handleLogin(): void
 
     jsonResponse([
         'success' => true,
+        'pending' => $isPending,
         'user' => [
             'id' => $user['id'],
             'first_name' => $user['first_name'],
@@ -105,8 +110,13 @@ function handleLogin(): void
 
 function handleRegister(): void
 {
-    $data = getInputJSON();
-    $required = ['first_name', 'last_name', 'email', 'password', 'phone', 'city', 'institution'];
+    $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+    if (strpos($contentType, 'multipart/form-data') !== false || strpos($contentType, 'application/x-www-form-urlencoded') !== false) {
+        $data = $_POST;
+    } else {
+        $data = getInputJSON();
+    }
+    $required = ['first_name', 'last_name', 'email', 'password'];
     foreach ($required as $field) {
         if (empty(trim($data[$field] ?? ''))) {
             jsonResponse(['error' => "Le champ {$field} est requis"], 400);

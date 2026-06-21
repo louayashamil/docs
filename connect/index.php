@@ -1086,7 +1086,7 @@ function handleLogin(e) {
   btn.disabled = true;
   btn.textContent = 'Connexion...';
   var fd = new FormData(form);
-  fetch(BASE_URL + '/api/login.php', { method: 'POST', body: fd })
+  fetch(BASE_URL + '/api/auth.php?action=login', { method: 'POST', body: fd })
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (data.success) {
@@ -1108,7 +1108,7 @@ function handleLogin(e) {
 }
 
 function handleGoogleLogin() {
-  window.location.href = BASE_URL + '/api/google-auth.php';
+  showToast('La connexion Google sera disponible prochainement.', 'info');
 }
 
 function handleRegister(e) {
@@ -1120,7 +1120,7 @@ function handleRegister(e) {
   btn.disabled = true;
   btn.textContent = 'Envoi...';
   var fd = new FormData(form);
-  fetch(BASE_URL + '/api/register.php', { method: 'POST', body: fd })
+  fetch(BASE_URL + '/api/auth.php?action=register', { method: 'POST', body: fd })
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (data.success) {
@@ -1170,7 +1170,7 @@ function handleProfileEdit(e) {
   var errEl = document.getElementById('profile-edit-error');
   errEl.classList.add('hidden');
   var fd = new FormData(document.getElementById('profileEditForm'));
-  fetch(BASE_URL + '/api/profile.php', { method: 'POST', body: fd })
+  fetch(BASE_URL + '/api/members.php?action=update', { method: 'POST', body: fd })
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (data.success) {

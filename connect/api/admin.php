@@ -20,25 +20,21 @@ switch ($action) {
         break;
     case 'approve':
         if ($method !== 'POST') jsonResponse(['error' => 'Method not allowed'], 405);
-        requireCsrf();
         requireRole(['super_admin', 'admin']);
         approveUser();
         break;
     case 'reject':
         if ($method !== 'POST') jsonResponse(['error' => 'Method not allowed'], 405);
-        requireCsrf();
         requireRole(['super_admin', 'admin']);
         rejectUser();
         break;
     case 'suspend':
         if ($method !== 'POST') jsonResponse(['error' => 'Method not allowed'], 405);
-        requireCsrf();
         requireRole(['super_admin', 'admin']);
         suspendUser();
         break;
     case 'role':
         if ($method !== 'PUT' && $method !== 'POST') jsonResponse(['error' => 'Method not allowed'], 405);
-        requireCsrf();
         requireRole(['super_admin']);
         changeRole();
         break;
@@ -46,9 +42,9 @@ switch ($action) {
         requireRole(['super_admin', 'admin', 'moderator']);
         listReports();
         break;
+    case 'handle-report':
     case 'report-action':
         if ($method !== 'POST') jsonResponse(['error' => 'Method not allowed'], 405);
-        requireCsrf();
         requireRole(['super_admin', 'admin', 'moderator']);
         handleReport();
         break;
@@ -58,7 +54,6 @@ switch ($action) {
         break;
     case 'batch-import':
         if ($method !== 'POST') jsonResponse(['error' => 'Method not allowed'], 405);
-        requireCsrf();
         requireRole(['super_admin', 'admin']);
         batchImport();
         break;
@@ -77,7 +72,7 @@ function listPending(): void
 function approveUser(): void
 {
     $data = getInputJSON();
-    $id = (int)($_GET['id'] ?? $data['id'] ?? 0);
+    $id = (int)($_GET['id'] ?? $data['user_id'] ?? $data['id'] ?? 0);
     if ($id <= 0) jsonResponse(['error' => 'ID invalide'], 400);
 
     $db = Database::getInstance();
@@ -106,7 +101,7 @@ function approveUser(): void
 function rejectUser(): void
 {
     $data = getInputJSON();
-    $id = (int)($_GET['id'] ?? $data['id'] ?? 0);
+    $id = (int)($_GET['id'] ?? $data['user_id'] ?? $data['id'] ?? 0);
     if ($id <= 0) jsonResponse(['error' => 'ID invalide'], 400);
 
     $db = Database::getInstance();

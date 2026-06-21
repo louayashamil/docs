@@ -572,8 +572,8 @@ input,textarea,select{font-family:inherit;font-size:inherit}
           <div class="group-icon">&#128101;</div>
           <div class="group-info"><div class="group-name">Annuaire</div></div>
         </div>
-        <?php if ($user['role'] === 'admin'): ?>
-        <div class="group-item" onclick="showView('adminView')">
+        <?php if (in_array($user['role'], ['super_admin', 'admin'])): ?>
+        <div class="group-item" onclick="showView('adminView');loadPendingMembers()">
           <div class="group-icon">&#9881;</div>
           <div class="group-info"><div class="group-name">Administration</div></div>
         </div>
@@ -752,11 +752,8 @@ input,textarea,select{font-family:inherit;font-size:inherit}
           </div>
         </div>
         <div id="adminStats" class="hidden">
-          <div class="admin-stats-grid">
-            <div class="admin-stat"><div class="stat-value" id="statMembers">0</div><div class="stat-label">Membres</div></div>
-            <div class="admin-stat"><div class="stat-value" id="statMessages">0</div><div class="stat-label">Messages</div></div>
-            <div class="admin-stat"><div class="stat-value" id="statGroups">0</div><div class="stat-label">Groupes</div></div>
-            <div class="admin-stat"><div class="stat-value" id="statFiles">0</div><div class="stat-label">Fichiers</div></div>
+          <div id="adminStatsContent">
+            <p style="color:var(--text-hint);text-align:center;padding:24px">Chargement...</p>
           </div>
         </div>
       </div>
@@ -1547,6 +1544,121 @@ function switchAdminTab(btn, tabId) {
     var el = document.getElementById(id);
     if (el) el.classList.toggle('hidden', id !== tabId);
   });
+  if (tabId === 'adminPending') loadPendingMembers();
+  if (tabId === 'adminReports') loadReports();
+  if (tabId === 'adminStats') loadAdminStats();
+}
+
+function loadPendingMembers() {
+  fetch(BASE_URL + '/api/admin.php?action=pending')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var list = document.getElementById('pendingList');
+      if (!data.members || data.members.length === 0) {
+        list.innerHTML = '<p style="color:var(--text-hint);font-size:14px;text-align:center;padding:24px">Aucune demande en attente.</p>';
+        return;
+      }
+      list.innerHTML = data.members.map(function(m) {
+        var initials = ((m.first_name || '?').charAt(0) + (m.last_name || '?').charAt(0)).toUpperCase();
+        return '<div class="pending-card">'
+          + '<div class="group-avatar" style="width:42px;height:42px;font-size:14px">' + escapeHTML(initials) + '</div>'
+          + '<div class="pending-info">'
+          + '<div class="pending-name">' + escapeHTML(m.first_name + ' ' + m.last_name) + '</div>'
+          + '<div class="pending-detail">' + escapeHTML(m.email) + '</div>'
+          + '<div class="pending-detail">' + escapeHTML((m.city || '') + (m.institution ? ' · ' + m.institution : '')) + '</div>'
+          + '</div>'
+          + '<div class="pending-actions">'
+          + '<button class="btn btn-sm" style="background:var(--success);color:#fff" onclick="approveMember(' + m.id + ')">Accepter</button>'
+          + '<button class="btn btn-sm" style="background:var(--error);color:#fff" onclick="rejectMember(' + m.id + ')">Refuser</button>'
+          + '</div></div>';
+      }).join('');
+    })
+    .catch(function() { showToast('Erreur chargement', 'error'); });
+}
+
+function approveMember(id) {
+  fetch(BASE_URL + '/api/admin.php?action=approve', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({user_id: id})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.success) { showToast('Membre approuvé', 'success'); loadPendingMembers(); }
+    else showToast(data.error || 'Erreur', 'error');
+  })
+  .catch(function() { showToast('Erreur', 'error'); });
+}
+
+function rejectMember(id) {
+  if (!confirm('Refuser cette demande ?')) return;
+  fetch(BASE_URL + '/api/admin.php?action=reject', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({user_id: id})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.success) { showToast('Demande refusée', 'success'); loadPendingMembers(); }
+    else showToast(data.error || 'Erreur', 'error');
+  })
+  .catch(function() { showToast('Erreur', 'error'); });
+}
+
+function loadReports() {
+  fetch(BASE_URL + '/api/admin.php?action=reports')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var list = document.getElementById('reportsList');
+      if (!list) return;
+      if (!data.reports || data.reports.length === 0) {
+        list.innerHTML = '<p style="color:var(--text-hint);font-size:14px;text-align:center;padding:24px">Aucun signalement.</p>';
+        return;
+      }
+      list.innerHTML = data.reports.map(function(r) {
+        return '<div class="pending-card">'
+          + '<div class="pending-info">'
+          + '<div class="pending-name">Motif: ' + escapeHTML(r.reason) + '</div>'
+          + '<div class="pending-detail">' + escapeHTML((r.content || '').substring(0, 80)) + '</div>'
+          + '<div class="pending-detail">Par: ' + escapeHTML(r.reporter_name || '') + '</div>'
+          + '</div>'
+          + '<div class="pending-actions">'
+          + '<button class="btn btn-sm" onclick="handleReport(' + r.id + ',\'dismiss\')">Ignorer</button>'
+          + '<button class="btn btn-sm" style="background:var(--error);color:#fff" onclick="handleReport(' + r.id + ',\'delete\')">Supprimer</button>'
+          + '</div></div>';
+      }).join('');
+    })
+    .catch(function() {});
+}
+
+function handleReport(id, action) {
+  fetch(BASE_URL + '/api/admin.php?action=handle-report', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({report_id: id, action: action})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.success) { showToast('Signalement traité', 'success'); loadReports(); }
+    else showToast(data.error || 'Erreur', 'error');
+  })
+  .catch(function() { showToast('Erreur', 'error'); });
+}
+
+function loadAdminStats() {
+  fetch(BASE_URL + '/api/admin.php?action=stats')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var el = document.getElementById('adminStatsContent');
+      if (!el) return;
+      el.innerHTML = '<div class="admin-stats-grid">'
+        + '<div class="admin-stat"><div class="stat-value">' + (data.total_members || 0) + '</div><div class="stat-label">Membres</div></div>'
+        + '<div class="admin-stat"><div class="stat-value">' + (data.pending_members || 0) + '</div><div class="stat-label">En attente</div></div>'
+        + '<div class="admin-stat"><div class="stat-value">' + (data.total_messages || 0) + '</div><div class="stat-label">Messages</div></div>'
+        + '<div class="admin-stat"><div class="stat-value">' + (data.total_groups || 0) + '</div><div class="stat-label">Salons</div></div>'
+        + '</div>';
+    })
+    .catch(function() {});
 }
 
 /* ============ BOTTOM NAV (mobile) ============ */

@@ -6,147 +6,87 @@
 
 const App = {
     // =========================================================================
-    // STATE
+    // 1. STATE
     // =========================================================================
     state: {
         user: null,
         groups: [],
         currentGroup: null,
         messages: [],
-        polling: null,
+        pollingInterval: null,
+        pollingTimeout: null,
         unreadCounts: {},
         lastMessageIds: {},
-        anonAccepted: false,
+        anonAccepted: {},
         attachments: [],
         replyTo: null,
         editingMessage: null,
-        csrfToken: '',
-        isMobile: window.innerWidth < 769,
-        searchTimer: null,
-        loadingOlder: false,
-        reportingMessageId: null,
-        anonCallback: null,
+        csrfToken: null,
+        isMobile: window.innerWidth < 768,
+        searchDebounceTimer: null,
+        isLoadingMore: false,
+        hasMoreMessages: true,
+        currentView: 'chat',
         notificationsOpen: false,
-        currentView: 'chatView',
-        typingTimer: null,
-        onlineUsers: new Set(),
-        messageObserver: null,
-        touchStartY: 0,
-        touchStartX: 0,
-        longPressTimer: null,
-        contextMessageId: null,
-        profileEditData: {},
+        notifications: [],
+        pendingMembers: [],
+        reports: [],
+        members: [],
+        documents: [],
+        events: [],
+        adminStats: {},
+        messagePage: 1,
+        memberPage: 1,
+        memberSearch: '',
+        docCategory: '',
+        toastTimeout: null
     },
 
     // =========================================================================
-    // INITIALIZATION
+    // 2. INIT
     // =========================================================================
-    async init() {
+    init() {
+        this.state.isMobile = window.innerWidth < 768;
+        this.state.csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
+        this.checkAuth();
         this.setupEventListeners();
-        this.setupResizeHandler();
-        this.setupKeyboardShortcuts();
-        this.setupIntersectionObserver();
-        await this.checkAuth();
         this.registerServiceWorker();
-        this.requestNotificationPermission();
-    },
-
-    setupResizeHandler() {
-        let resizeTimer;
         window.addEventListener('resize', () => {
-            clearTimeout(resizeTimer);
-            resizeTimer = setTimeout(() => {
-                const wasMobile = this.state.isMobile;
-                this.state.isMobile = window.innerWidth < 769;
-                if (wasMobile !== this.state.isMobile) {
-                    this.handleResponsiveChange();
-                }
-            }, 150);
+            this.state.isMobile = window.innerWidth < 768;
+            this.handleResize();
         });
     },
 
-    handleResponsiveChange() {
-        const sidebar = document.getElementById('sidebar');
-        const mainContent = document.getElementById('mainContent');
-        if (!sidebar || !mainContent) return;
-
-        if (this.state.isMobile) {
-            if (this.state.currentGroup) {
-                sidebar.classList.add('hidden');
-                mainContent.classList.remove('hidden');
-            } else {
-                sidebar.classList.remove('hidden');
-                mainContent.classList.add('hidden');
-            }
-        } else {
-            sidebar.classList.remove('hidden');
-            mainContent.classList.remove('hidden');
+    handleResize() {
+        this.state.isMobile = window.innerWidth < 768;
+        if (!this.state.isMobile) {
+            const sidebar = document.getElementById('sidebar');
+            if (sidebar) sidebar.classList.remove('hidden');
+            const mainContent = document.getElementById('mainContent');
+            if (mainContent) mainContent.classList.remove('hidden');
         }
     },
 
-    setupKeyboardShortcuts() {
-        document.addEventListener('keydown', (e) => {
-            // Ctrl+K or Cmd+K for search
-            if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-                e.preventDefault();
-                this.showSearch();
-                return;
-            }
-            // Escape to close modals/overlays
-            if (e.key === 'Escape') {
-                this.closeImageViewer();
-                this.hideSearch();
-                this.hideAllModals();
-                const dropdown = document.getElementById('notificationsDropdown');
-                if (dropdown && !dropdown.classList.contains('hidden')) {
-                    dropdown.classList.add('hidden');
-                }
-            }
-        });
-    },
-
-    setupIntersectionObserver() {
-        if ('IntersectionObserver' in window) {
-            this.state.messageObserver = new IntersectionObserver((entries) => {
-                entries.forEach(entry => {
-                    if (entry.isIntersecting) {
-                        const img = entry.target;
-                        if (img.dataset.src) {
-                            img.src = img.dataset.src;
-                            delete img.dataset.src;
-                            this.state.messageObserver.unobserve(img);
-                        }
-                    }
-                });
-            }, { rootMargin: '200px' });
-        }
-    },
-
+    // =========================================================================
+    // 3. SETUP EVENT LISTENERS
+    // =========================================================================
     setupEventListeners() {
-        // ---- Login form ----
         const loginForm = document.getElementById('loginForm');
         if (loginForm) {
             loginForm.addEventListener('submit', (e) => {
                 e.preventDefault();
-                const email = loginForm.querySelector('[name="email"]')?.value?.trim();
-                const password = loginForm.querySelector('[name="password"]')?.value;
-                if (email && password) {
-                    this.login(email, password);
-                }
+                this.login();
             });
         }
 
-        // ---- Register form ----
         const registerForm = document.getElementById('registerForm');
         if (registerForm) {
             registerForm.addEventListener('submit', (e) => {
                 e.preventDefault();
-                const formData = new FormData(registerForm);
-                this.register(formData);
+                this.register();
             });
         }
 
-        // ---- Composer form ----
         const composerForm = document.getElementById('composerForm');
         if (composerForm) {
             composerForm.addEventListener('submit', (e) => {
@@ -155,209 +95,117 @@ const App = {
             });
         }
 
-        // ---- Composer input auto-resize + Enter to send ----
         const composerInput = document.getElementById('composerInput');
         if (composerInput) {
             composerInput.addEventListener('input', () => {
-                this.autoResizeTextarea(composerInput);
+                composerInput.style.height = 'auto';
+                composerInput.style.height = Math.min(composerInput.scrollHeight, 120) + 'px';
             });
-
             composerInput.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     this.sendMessage();
                 }
             });
-
-            composerInput.addEventListener('paste', (e) => {
-                const items = e.clipboardData?.items;
-                if (!items) return;
-                for (let i = 0; i < items.length; i++) {
-                    if (items[i].type.startsWith('image/')) {
-                        e.preventDefault();
-                        const file = items[i].getAsFile();
-                        if (file) {
-                            this.handleAttachment([file], 'image');
-                        }
-                        break;
-                    }
-                }
-            });
         }
 
-        // ---- Attach button ----
         const attachBtn = document.getElementById('attachBtn');
-        if (attachBtn) {
-            attachBtn.addEventListener('click', () => {
-                document.getElementById('fileInput')?.click();
-            });
-        }
-
-        // ---- Photo button ----
-        const photoBtn = document.getElementById('photoBtn');
-        if (photoBtn) {
-            photoBtn.addEventListener('click', () => {
-                document.getElementById('photoInput')?.click();
-            });
-        }
-
-        // ---- Send button ----
-        const sendBtn = document.getElementById('sendBtn');
-        if (sendBtn) {
-            sendBtn.addEventListener('click', (e) => {
-                e.preventDefault();
-                this.sendMessage();
-            });
-        }
-
-        // ---- File input change ----
         const fileInput = document.getElementById('fileInput');
-        if (fileInput) {
+        if (attachBtn && fileInput) {
+            attachBtn.addEventListener('click', () => fileInput.click());
             fileInput.addEventListener('change', (e) => {
-                if (e.target.files.length > 0) {
-                    this.handleAttachment(e.target.files, 'file');
-                    e.target.value = '';
-                }
+                Array.from(e.target.files).forEach(f => this.handleAttachment(f, 'file'));
+                fileInput.value = '';
             });
         }
 
-        // ---- Photo input change ----
+        const photoBtn = document.getElementById('photoBtn');
         const photoInput = document.getElementById('photoInput');
-        if (photoInput) {
+        if (photoBtn && photoInput) {
+            photoBtn.addEventListener('click', () => photoInput.click());
             photoInput.addEventListener('change', (e) => {
-                if (e.target.files.length > 0) {
-                    this.handleAttachment(e.target.files, 'image');
-                    e.target.value = '';
-                }
+                Array.from(e.target.files).forEach(f => this.handleAttachment(f, 'photo'));
+                photoInput.value = '';
             });
         }
 
-        // ---- Search input ----
         const searchInput = document.getElementById('searchInput');
         if (searchInput) {
             searchInput.addEventListener('input', (e) => {
-                clearTimeout(this.state.searchTimer);
-                this.state.searchTimer = setTimeout(() => {
-                    this.search(e.target.value.trim());
-                }, 400);
-            });
-
-            searchInput.addEventListener('keydown', (e) => {
-                if (e.key === 'Escape') {
-                    this.hideSearch();
-                }
+                clearTimeout(this.state.searchDebounceTimer);
+                this.state.searchDebounceTimer = setTimeout(() => {
+                    this.search(e.target.value);
+                }, 350);
             });
         }
 
-        // ---- Notification bell ----
-        const notifBell = document.getElementById('notifBadge')?.parentElement
-            || document.querySelector('.notification-bell');
-        if (notifBell) {
-            notifBell.addEventListener('click', (e) => {
+        const notifBadge = document.getElementById('notifBadge');
+        if (notifBadge) {
+            notifBadge.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this.toggleNotifications();
             });
         }
 
-        // ---- Modal close buttons ----
-        document.addEventListener('click', (e) => {
-            // Close button inside modals
-            if (e.target.classList.contains('modal-close') || e.target.closest('.modal-close')) {
-                const modal = e.target.closest('.modal-overlay');
-                if (modal) {
-                    modal.classList.remove('active');
-                    document.body.style.overflow = '';
-                }
-            }
-
-            // Click on overlay background
-            if (e.target.classList.contains('modal-overlay')) {
-                e.target.classList.remove('active');
-                document.body.style.overflow = '';
-            }
-
-            // Close notifications dropdown when clicking outside
-            const dropdown = document.getElementById('notificationsDropdown');
-            if (dropdown && !dropdown.classList.contains('hidden')) {
-                if (!e.target.closest('.notification-bell') && !e.target.closest('#notificationsDropdown')) {
-                    dropdown.classList.add('hidden');
-                }
-            }
-        });
-
-        // ---- Mobile tab clicks ----
         document.querySelectorAll('.mobile-tab').forEach(tab => {
-            tab.addEventListener('click', (e) => {
-                e.preventDefault();
+            tab.addEventListener('click', () => {
                 const view = tab.dataset.view;
                 if (view) {
-                    document.querySelectorAll('.mobile-tab').forEach(t => t.classList.remove('active'));
-                    tab.classList.add('active');
-                    if (view === 'groups') {
-                        this.goBack();
-                    } else {
-                        this.showView(view + 'View');
-                    }
+                    this.showView(view);
                 }
+                document.querySelectorAll('.mobile-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
             });
         });
 
-        // ---- Group section toggle (Autre) ----
-        document.addEventListener('click', (e) => {
-            const toggle = e.target.closest('.group-section-toggle');
-            if (toggle) {
-                this.toggleOtherGroups();
-            }
+        document.querySelectorAll('.group-section-toggle').forEach(btn => {
+            btn.addEventListener('click', () => this.toggleOtherGroups());
         });
 
-        // ---- Messages container scroll (infinite scroll) ----
         const messagesContainer = document.getElementById('messagesContainer');
         if (messagesContainer) {
             messagesContainer.addEventListener('scroll', () => {
-                if (messagesContainer.scrollTop < 100 && !this.state.loadingOlder) {
-                    this.loadOlderMessages();
-                }
-            });
-
-            // Touch events for long press on messages
-            messagesContainer.addEventListener('touchstart', (e) => {
-                const msgEl = e.target.closest('.message');
-                if (msgEl) {
-                    this.state.touchStartY = e.touches[0].clientY;
-                    this.state.touchStartX = e.touches[0].clientX;
-                    this.state.longPressTimer = setTimeout(() => {
-                        const msgId = parseInt(msgEl.dataset.msgId);
-                        if (msgId) this.showMessageContextMenu(msgId, e.touches[0].clientX, e.touches[0].clientY);
-                    }, 600);
-                }
-            });
-
-            messagesContainer.addEventListener('touchmove', () => {
-                if (this.state.longPressTimer) {
-                    clearTimeout(this.state.longPressTimer);
-                    this.state.longPressTimer = null;
-                }
-            });
-
-            messagesContainer.addEventListener('touchend', () => {
-                if (this.state.longPressTimer) {
-                    clearTimeout(this.state.longPressTimer);
-                    this.state.longPressTimer = null;
+                if (messagesContainer.scrollTop < 80 && !this.state.isLoadingMore && this.state.hasMoreMessages) {
+                    this.loadMoreMessages();
                 }
             });
         }
 
-        // ---- Image viewer close ----
+        document.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+                e.preventDefault();
+                this.showSearch();
+            }
+            if (e.key === 'Escape') {
+                this.hideAllModals();
+                this.hideSearch();
+            }
+        });
+
+        document.addEventListener('click', (e) => {
+            const dropdown = document.getElementById('notificationsDropdown');
+            if (dropdown && !dropdown.contains(e.target) && this.state.notificationsOpen) {
+                this.toggleNotifications();
+            }
+        });
+
+        document.querySelectorAll('.modal').forEach(modal => {
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    this.hideModal(modal.id);
+                }
+            });
+        });
+
         const imageViewer = document.getElementById('imageViewer');
         if (imageViewer) {
             imageViewer.addEventListener('click', (e) => {
-                if (e.target === imageViewer || e.target.classList.contains('viewer-close')) {
+                if (e.target === imageViewer) {
                     this.closeImageViewer();
                 }
             });
         }
 
-        // ---- Report form ----
         const reportForm = document.getElementById('reportForm');
         if (reportForm) {
             reportForm.addEventListener('submit', (e) => {
@@ -366,750 +214,698 @@ const App = {
             });
         }
 
-        // ---- Window click to close context menu ----
-        document.addEventListener('click', (e) => {
-            const contextMenu = document.getElementById('contextMenu');
-            if (contextMenu && !e.target.closest('#contextMenu')) {
-                contextMenu.remove();
-            }
+        window.addEventListener('beforeunload', () => {
+            this.stopPolling();
         });
-
-        // ---- Visibility change - pause/resume polling ----
-        document.addEventListener('visibilitychange', () => {
-            if (document.hidden) {
-                this.stopPolling();
-            } else {
-                if (this.state.user && this.state.user.role !== 'pending') {
-                    this.startPolling();
-                    if (this.state.currentGroup) {
-                        this.pollUpdates();
-                    }
-                }
-            }
-        });
-    },
-
-    autoResizeTextarea(textarea) {
-        textarea.style.height = 'auto';
-        const maxHeight = 150;
-        const newHeight = Math.min(textarea.scrollHeight, maxHeight);
-        textarea.style.height = newHeight + 'px';
-        textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden';
     },
 
     // =========================================================================
-    // API HELPER
+    // 4. API HELPER
     // =========================================================================
     async api(endpoint, options = {}) {
         const url = '/connect/api/' + endpoint;
-        const defaultHeaders = {
-            'X-Requested-With': 'XMLHttpRequest',
+        const config = {
+            method: options.method || 'GET',
+            headers: {},
+            credentials: 'same-origin'
         };
 
         if (this.state.csrfToken) {
-            defaultHeaders['X-CSRF-Token'] = this.state.csrfToken;
+            config.headers['X-CSRF-Token'] = this.state.csrfToken;
         }
 
-        const fetchOptions = {
-            credentials: 'same-origin',
-            ...options,
-            headers: {
-                ...defaultHeaders,
-                ...(options.headers || {}),
-            },
-        };
-
-        if (options.body && !(options.body instanceof FormData)) {
-            fetchOptions.headers['Content-Type'] = 'application/json';
-            fetchOptions.body = JSON.stringify(options.body);
+        if (options.body instanceof FormData) {
+            config.body = options.body;
+        } else if (options.body) {
+            config.headers['Content-Type'] = 'application/json';
+            config.body = JSON.stringify(options.body);
         }
 
         try {
-            const res = await fetch(url, fetchOptions);
+            const response = await fetch(url, config);
 
-            if (res.status === 401) {
+            if (response.status === 401) {
                 this.state.user = null;
                 this.stopPolling();
                 this.showLanding();
-                return null;
+                throw new Error('Session expirée. Veuillez vous reconnecter.');
             }
 
-            if (res.status === 403) {
-                this.showToast('Accès refusé', 'error');
-                return null;
+            if (response.status === 403) {
+                throw new Error('Accès refusé.');
             }
 
-            if (res.status === 429) {
-                this.showToast('Trop de requêtes. Veuillez patienter.', 'error');
-                return null;
+            if (response.status === 429) {
+                throw new Error('Trop de requêtes. Veuillez patienter.');
             }
 
-            const data = await res.json();
+            const data = await response.json();
 
-            if (!res.ok) {
+            if (!response.ok) {
                 throw new Error(data.error || data.message || 'Erreur serveur');
             }
 
-            // Update CSRF token if provided
             if (data.csrf_token) {
                 this.state.csrfToken = data.csrf_token;
             }
 
             return data;
-        } catch (err) {
-            if (err.name === 'TypeError' && err.message.includes('fetch')) {
-                this.showToast('Erreur de connexion réseau', 'error');
-                return null;
+        } catch (error) {
+            if (error.name === 'TypeError' && error.message === 'Failed to fetch') {
+                throw new Error('Erreur de connexion. Vérifiez votre réseau.');
             }
-            throw err;
+            throw error;
         }
     },
 
     // =========================================================================
-    // AUTH
+    // 5. AUTH
     // =========================================================================
     async checkAuth() {
         try {
-            const data = await this.api('auth.php?action=me');
-            if (data && data.user) {
+            const data = await this.api('auth.php?action=check');
+            if (data.authenticated && data.user) {
                 this.state.user = data.user;
-                this.state.csrfToken = data.csrf_token || '';
-                if (data.user.role === 'pending') {
+                if (data.user.status === 'pending') {
                     this.showWaiting();
-                } else {
+                } else if (data.user.status === 'active') {
                     this.showApp();
+                } else {
+                    this.showLanding();
                 }
             } else {
                 this.showLanding();
             }
-        } catch (err) {
+        } catch (e) {
             this.showLanding();
         }
     },
 
-    async login(email, password) {
-        const submitBtn = document.querySelector('#loginForm button[type="submit"]');
-        const errorEl = document.getElementById('loginError');
+    async login() {
+        const form = document.getElementById('loginForm');
+        const email = form.querySelector('[name="email"]').value.trim();
+        const password = form.querySelector('[name="password"]').value;
 
-        if (submitBtn) {
-            submitBtn.disabled = true;
-            submitBtn.textContent = 'Connexion...';
+        if (!email || !password) {
+            this.showToast('Veuillez remplir tous les champs.', 'error');
+            return;
         }
-        if (errorEl) errorEl.textContent = '';
+
+        const submitBtn = form.querySelector('[type="submit"]');
+        const originalText = submitBtn.textContent;
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Connexion...';
 
         try {
             const data = await this.api('auth.php?action=login', {
                 method: 'POST',
-                body: { email, password },
+                body: { email, password }
             });
 
-            if (data && data.user) {
+            if (data.success) {
                 this.state.user = data.user;
-                this.state.csrfToken = data.csrf_token || '';
+                this.hideModal('loginModal');
+                form.reset();
 
-                if (data.user.role === 'pending') {
-                    this.hideModal('loginModal');
+                if (data.user.status === 'pending') {
                     this.showWaiting();
-                } else if (data.user.role === 'blocked') {
-                    if (errorEl) errorEl.textContent = 'Votre compte est bloqué. Contactez un administrateur.';
-                } else {
-                    this.hideModal('loginModal');
+                } else if (data.user.status === 'active') {
                     this.showApp();
-                    this.showToast('Bienvenue, ' + this.escapeHtml(data.user.first_name) + ' !', 'success');
+                } else {
+                    this.showToast('Votre compte a été suspendu.', 'error');
                 }
+            } else {
+                this.showToast(data.error || 'Identifiants incorrects.', 'error');
             }
-        } catch (err) {
-            const msg = err.message || 'Identifiants incorrects';
-            if (errorEl) errorEl.textContent = msg;
-            else this.showToast(msg, 'error');
+        } catch (e) {
+            this.showToast(e.message, 'error');
         } finally {
-            if (submitBtn) {
-                submitBtn.disabled = false;
-                submitBtn.textContent = 'Se connecter';
-            }
+            submitBtn.disabled = false;
+            submitBtn.textContent = originalText;
         }
     },
 
-    async register(formData) {
-        const submitBtn = document.querySelector('#registerForm button[type="submit"]');
-        const errorEl = document.getElementById('registerError');
-        const successEl = document.getElementById('registerSuccess');
+    async register() {
+        const form = document.getElementById('registerForm');
+        const formData = new FormData(form);
 
-        if (submitBtn) {
-            submitBtn.disabled = true;
-            submitBtn.textContent = 'Inscription...';
+        const requiredFields = ['first_name', 'last_name', 'email', 'password', 'rpps', 'city'];
+        for (const field of requiredFields) {
+            if (!formData.get(field)?.trim()) {
+                this.showToast('Veuillez remplir tous les champs obligatoires.', 'error');
+                return;
+            }
         }
-        if (errorEl) errorEl.textContent = '';
-        if (successEl) successEl.textContent = '';
+
+        const password = formData.get('password');
+        const passwordConfirm = formData.get('password_confirm');
+        if (password !== passwordConfirm) {
+            this.showToast('Les mots de passe ne correspondent pas.', 'error');
+            return;
+        }
+
+        if (password.length < 8) {
+            this.showToast('Le mot de passe doit contenir au moins 8 caractères.', 'error');
+            return;
+        }
+
+        const submitBtn = form.querySelector('[type="submit"]');
+        const originalText = submitBtn.textContent;
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Inscription...';
 
         try {
-            formData.append('action', 'register');
             const data = await this.api('auth.php?action=register', {
                 method: 'POST',
-                body: formData,
+                body: formData
             });
 
-            if (data && data.success) {
-                if (successEl) {
-                    successEl.textContent = data.message || 'Inscription réussie ! Votre demande est en cours de validation.';
-                }
-                const form = document.getElementById('registerForm');
-                if (form) form.reset();
-
-                setTimeout(() => {
-                    this.hideModal('registerModal');
-                    this.showToast('Demande d\'inscription envoyée', 'success');
-                }, 2000);
+            if (data.success) {
+                this.state.user = data.user;
+                this.hideModal('registerModal');
+                form.reset();
+                this.showWaiting();
+                this.showToast('Inscription réussie ! En attente de validation.', 'success');
+            } else {
+                this.showToast(data.error || "Erreur lors de l'inscription.", 'error');
             }
-        } catch (err) {
-            const msg = err.message || 'Erreur lors de l\'inscription';
-            if (errorEl) errorEl.textContent = msg;
-            else this.showToast(msg, 'error');
+        } catch (e) {
+            this.showToast(e.message, 'error');
         } finally {
-            if (submitBtn) {
-                submitBtn.disabled = false;
-                submitBtn.textContent = 'S\'inscrire';
-            }
+            submitBtn.disabled = false;
+            submitBtn.textContent = originalText;
         }
     },
 
     async logout() {
         try {
             await this.api('auth.php?action=logout', { method: 'POST' });
-        } catch (err) {
-            // Continue with local logout even if API fails
+        } catch (e) {
+            /* ignore */
         }
         this.state.user = null;
-        this.state.currentGroup = null;
-        this.state.messages = [];
         this.state.groups = [];
-        this.state.unreadCounts = {};
-        this.state.anonAccepted = false;
+        this.state.messages = [];
+        this.state.currentGroup = null;
         this.stopPolling();
         this.showLanding();
-        this.showToast('Déconnexion réussie', 'success');
     },
 
     async forgotPassword(email) {
-        if (!email) {
-            this.showToast('Veuillez saisir votre adresse email', 'error');
+        if (!email || !email.trim()) {
+            this.showToast('Veuillez entrer votre adresse email.', 'error');
             return;
         }
 
         try {
-            const data = await this.api('auth.php?action=forgot-password', {
+            const data = await this.api('auth.php?action=forgot_password', {
                 method: 'POST',
-                body: { email },
+                body: { email: email.trim() }
             });
-
-            if (data && data.success) {
-                this.showToast('Un email de réinitialisation a été envoyé', 'success');
-                this.hideModal('forgotPasswordModal');
-            }
-        } catch (err) {
-            this.showToast(err.message || 'Erreur lors de l\'envoi', 'error');
+            this.showToast(data.message || 'Un email de réinitialisation a été envoyé.', 'success');
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
     async resetPassword(token, newPassword) {
-        try {
-            const data = await this.api('auth.php?action=reset-password', {
-                method: 'POST',
-                body: { token, password: newPassword },
-            });
+        if (!newPassword || newPassword.length < 8) {
+            this.showToast('Le mot de passe doit contenir au moins 8 caractères.', 'error');
+            return;
+        }
 
-            if (data && data.success) {
-                this.showToast('Mot de passe modifié avec succès', 'success');
-                this.showModal('loginModal');
+        try {
+            const data = await this.api('auth.php?action=reset_password', {
+                method: 'POST',
+                body: { token, password: newPassword }
+            });
+            if (data.success) {
+                this.showToast('Mot de passe réinitialisé avec succès.', 'success');
+                this.hideAllModals();
             }
-        } catch (err) {
-            this.showToast(err.message || 'Erreur lors de la réinitialisation', 'error');
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
-    async changePassword(currentPassword, newPassword) {
-        try {
-            const data = await this.api('auth.php?action=change-password', {
-                method: 'POST',
-                body: { current_password: currentPassword, new_password: newPassword },
-            });
+    async changePassword(currentPassword, newPassword, confirmPassword) {
+        if (newPassword !== confirmPassword) {
+            this.showToast('Les mots de passe ne correspondent pas.', 'error');
+            return;
+        }
+        if (newPassword.length < 8) {
+            this.showToast('Le mot de passe doit contenir au moins 8 caractères.', 'error');
+            return;
+        }
 
-            if (data && data.success) {
-                this.showToast('Mot de passe modifié avec succès', 'success');
+        try {
+            const data = await this.api('auth.php?action=change_password', {
+                method: 'POST',
+                body: {
+                    current_password: currentPassword,
+                    new_password: newPassword
+                }
+            });
+            if (data.success) {
+                this.showToast('Mot de passe modifié avec succès.', 'success');
             }
-        } catch (err) {
-            this.showToast(err.message || 'Erreur lors du changement', 'error');
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
     // =========================================================================
-    // VIEW MANAGEMENT
+    // 6. VIEW MANAGEMENT
     // =========================================================================
     showLanding() {
-        document.getElementById('landingPage')?.classList.remove('hidden');
-        document.getElementById('appContainer')?.classList.add('hidden');
-        document.getElementById('waitingPage')?.classList.add('hidden');
+        const landing = document.getElementById('landingPage');
+        const app = document.getElementById('appContainer');
+        const waiting = document.getElementById('waitingPage');
+        if (landing) landing.style.display = '';
+        if (app) app.style.display = 'none';
+        if (waiting) waiting.style.display = 'none';
+        this.stopPolling();
     },
 
     showApp() {
-        document.getElementById('landingPage')?.classList.add('hidden');
-        document.getElementById('appContainer')?.classList.remove('hidden');
-        document.getElementById('waitingPage')?.classList.add('hidden');
+        const landing = document.getElementById('landingPage');
+        const app = document.getElementById('appContainer');
+        const waiting = document.getElementById('waitingPage');
+        if (landing) landing.style.display = 'none';
+        if (app) app.style.display = '';
+        if (waiting) waiting.style.display = 'none';
+
+        this.updateUserUI();
         this.loadGroups();
         this.startPolling();
-        this.updateUserUI();
+        this.requestNotificationPermission();
     },
 
     showWaiting() {
-        document.getElementById('landingPage')?.classList.add('hidden');
-        document.getElementById('appContainer')?.classList.add('hidden');
-        document.getElementById('waitingPage')?.classList.remove('hidden');
+        const landing = document.getElementById('landingPage');
+        const app = document.getElementById('appContainer');
+        const waiting = document.getElementById('waitingPage');
+        if (landing) landing.style.display = 'none';
+        if (app) app.style.display = 'none';
+        if (waiting) waiting.style.display = '';
+        this.stopPolling();
     },
 
     showView(viewName) {
         const views = ['chatView', 'libraryView', 'agendaView', 'directoryView', 'adminView', 'profileView'];
         views.forEach(v => {
             const el = document.getElementById(v);
-            if (el) el.classList.toggle('hidden', v !== viewName);
+            if (el) el.style.display = 'none';
         });
+
+        const targetView = document.getElementById(viewName + 'View') || document.getElementById(viewName);
+        if (targetView) targetView.style.display = '';
 
         this.state.currentView = viewName;
 
-        // Update mobile tab active state
-        document.querySelectorAll('.mobile-tab').forEach(tab => {
-            const tabView = tab.dataset.view;
-            if (tabView) {
-                tab.classList.toggle('active', tabView + 'View' === viewName);
-            }
-        });
-
-        // Load data for the selected view
         switch (viewName) {
-            case 'libraryView':
+            case 'chat':
+                if (this.state.currentGroup) {
+                    this.loadMessages(this.state.currentGroup.id);
+                }
+                break;
+            case 'library':
                 this.loadDocuments();
                 break;
-            case 'agendaView':
+            case 'agenda':
                 this.loadEvents();
                 break;
-            case 'directoryView':
+            case 'directory':
+                this.state.memberPage = 1;
                 this.loadMembers();
                 break;
-            case 'adminView':
-                this.loadAdminDashboard();
-                break;
-            case 'profileView':
-                this.renderProfile();
-                break;
-            case 'chatView':
-                if (this.state.currentGroup) {
-                    this.scrollToBottom();
+            case 'admin':
+                if (this.isAdmin()) {
+                    this.loadAdminDashboard();
                 }
+                break;
+            case 'profile':
+                this.renderProfile();
                 break;
         }
     },
 
     // =========================================================================
-    // GROUPS
+    // 7. GROUPS
     // =========================================================================
     async loadGroups() {
         try {
             const data = await this.api('groups.php?action=list');
-            if (data && data.groups) {
-                this.state.groups = data.groups;
-                this.renderGroupList();
+            this.state.groups = data.groups || [];
+            this.renderGroupList();
 
-                // Auto-open first group if none selected
-                if (!this.state.currentGroup && data.groups.length > 0) {
-                    this.openGroup(data.groups[0].id);
-                }
+            if (this.state.groups.length > 0 && !this.state.currentGroup) {
+                this.openGroup(this.state.groups[0]);
             }
-        } catch (err) {
-            this.showToast('Erreur de chargement des salons', 'error');
+        } catch (e) {
+            this.showToast('Erreur lors du chargement des groupes.', 'error');
         }
     },
 
     renderGroupList() {
-        const container = document.getElementById('groupList');
-        if (!container) return;
+        const groupList = document.getElementById('groupList');
+        if (!groupList) return;
 
-        // Separate general from others
-        const generalGroup = this.state.groups.find(g => g.type === 'general');
-        const otherGroups = this.state.groups.filter(g => g.type !== 'general');
+        const mainGroups = this.state.groups.filter(g => g.type === 'main' || g.category === 'general');
+        const otherGroups = this.state.groups.filter(g => g.type !== 'main' && g.category !== 'general');
 
         let html = '';
 
-        // Discussion generale at top
-        if (generalGroup) {
-            html += this.renderGroupItem(generalGroup);
-        }
-
-        // Specialty/thematic groups (non-general, non-other)
-        const mainGroups = otherGroups.filter(g =>
-            ['announcement', 'clinical_cases', 'scientific'].includes(g.type)
-        );
-        mainGroups.forEach(g => {
-            html += this.renderGroupItem(g);
+        mainGroups.forEach(group => {
+            html += this.renderGroupItem(group);
         });
 
-        // "Autre" section with collapsible toggle
-        const autreGroups = otherGroups.filter(g =>
-            !['announcement', 'clinical_cases', 'scientific'].includes(g.type)
-        );
-        if (autreGroups.length > 0) {
-            const expanded = this.state.autreExpanded !== false;
-            html += `<div class="group-section-header group-section-toggle" onclick="App.toggleOtherGroups()">
-                <span>Autre</span>
-                <svg class="arrow ${expanded ? '' : 'rotated'}" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="6 9 12 15 18 9"/>
-                </svg>
-            </div>`;
-            html += `<div class="group-section-content" id="otherGroups" ${expanded ? '' : 'style="display:none"'}>`;
-            autreGroups.forEach(g => {
-                html += this.renderGroupItem(g);
+        if (otherGroups.length > 0) {
+            html += '<div class="group-section">';
+            html += '<button class="group-section-toggle" onclick="App.toggleOtherGroups()">';
+            html += '<span>Autre</span>';
+            html += '<span class="toggle-icon">&#9660;</span>';
+            html += '</button>';
+            html += '<div class="group-section-content" style="display:none;">';
+            otherGroups.forEach(group => {
+                html += this.renderGroupItem(group);
             });
-            html += `</div>`;
+            html += '</div></div>';
         }
 
-        container.innerHTML = html;
+        groupList.innerHTML = html;
     },
 
     renderGroupItem(group) {
-        const unread = this.state.unreadCounts[group.id] || group.unread_count || 0;
+        const unread = this.state.unreadCounts[group.id] || 0;
         const isActive = this.state.currentGroup && this.state.currentGroup.id === group.id;
-        const lastMsg = group.last_message || '';
-        const lastTime = group.last_message_time
-            ? this.formatTime(new Date(group.last_message_time))
+        const lastMsg = group.last_message;
+        let preview = '';
+        let timeStr = '';
+
+        if (lastMsg) {
+            const senderName = lastMsg.sender_id === this.state.user?.id
+                ? 'Vous'
+                : (lastMsg.sender_name || '');
+            const msgText = lastMsg.content
+                ? lastMsg.content.substring(0, 50)
+                : (lastMsg.has_attachment ? 'Piece jointe' : '');
+            preview = senderName ? senderName + ': ' + msgText : msgText;
+            if (preview.length > 55) preview = preview.substring(0, 55) + '...';
+            timeStr = this.timeAgo(lastMsg.created_at);
+        }
+
+        const badgeHtml = unread > 0
+            ? '<span class="unread-badge">' + (unread > 99 ? '99+' : unread) + '</span>'
             : '';
-        const initials = group.name
-            .split(' ')
-            .map(w => w[0])
-            .join('')
-            .substring(0, 2)
-            .toUpperCase();
 
-        const icons = {
-            general: '💬',
-            announcement: '📢',
-            clinical_cases: '🔬',
-            scientific: '🧪',
-            library: '📚',
-            agenda: '📅',
-        };
-        const icon = icons[group.type] || '💬';
+        const icon = group.icon
+            || (group.type === 'clinical_cases' ? '&#127973;' : (group.type === 'main' ? '&#128172;' : '&#128101;'));
 
-        return `<div class="group-item ${isActive ? 'active' : ''}" onclick="App.openGroup(${group.id})" data-group-id="${group.id}">
-            <div class="group-avatar" title="${this.escapeHtml(group.name)}">${icon}</div>
-            <div class="group-info">
-                <div class="group-name">${this.escapeHtml(group.name)}</div>
-                <div class="group-preview">${this.escapeHtml(this.truncate(lastMsg, 45))}</div>
-            </div>
-            <div class="group-meta">
-                <span class="group-time">${lastTime}</span>
-                ${unread > 0 ? `<span class="group-badge">${unread > 99 ? '99+' : unread}</span>` : ''}
-            </div>
-        </div>`;
+        const groupData = this.escapeHtml(JSON.stringify(group));
+
+        return '<div class="group-item ' + (isActive ? 'active' : '') + '" data-group-id="' + group.id + '" onclick=\'App.openGroup(' + JSON.stringify(group).replace(/'/g, "\\'") + ')\'>'
+            + '<div class="group-icon">' + icon + '</div>'
+            + '<div class="group-info">'
+            + '<div class="group-name-row">'
+            + '<span class="group-name">' + this.escapeHtml(group.name) + '</span>'
+            + '<span class="group-time">' + timeStr + '</span>'
+            + '</div>'
+            + '<div class="group-preview-row">'
+            + '<span class="group-preview">' + this.escapeHtml(preview) + '</span>'
+            + badgeHtml
+            + '</div>'
+            + '</div>'
+            + '</div>';
     },
 
     toggleOtherGroups() {
-        const el = document.getElementById('otherGroups');
-        const arrow = document.querySelector('.group-section-toggle .arrow');
-        if (el) {
-            const isHidden = el.style.display === 'none';
-            el.style.display = isHidden ? '' : 'none';
-            this.state.autreExpanded = isHidden;
-        }
-        if (arrow) {
-            arrow.classList.toggle('rotated');
+        const content = document.querySelector('.group-section-content');
+        const icon = document.querySelector('.toggle-icon');
+        if (content) {
+            const isHidden = content.style.display === 'none';
+            content.style.display = isHidden ? '' : 'none';
+            if (icon) icon.innerHTML = isHidden ? '&#9650;' : '&#9660;';
         }
     },
 
-    async openGroup(groupId) {
-        const group = this.state.groups.find(g => g.id === groupId);
+    async openGroup(group) {
+        if (typeof group === 'string') {
+            group = this.state.groups.find(g => g.id === group || g.id === parseInt(group));
+        }
         if (!group) return;
 
         this.state.currentGroup = group;
         this.state.messages = [];
-        this.state.replyTo = null;
-        this.state.editingMessage = null;
-        this.state.attachments = [];
-        this.state.anonAccepted = false;
-        this.clearAttachments();
+        this.state.hasMoreMessages = true;
+        this.state.messagePage = 1;
         this.clearReply();
+        this.clearAttachments();
 
-        // Show chat view
-        this.showView('chatView');
-
-        // Update chat header
         const chatName = document.getElementById('chatName');
-        if (chatName) chatName.textContent = group.name;
-
         const chatMembers = document.getElementById('chatMembers');
-        if (chatMembers) {
-            chatMembers.textContent = group.member_count
-                ? `${group.member_count} membres`
-                : '';
+        if (chatName) chatName.textContent = group.name;
+        if (chatMembers) chatMembers.textContent = (group.member_count || 0) + ' membres';
+
+        this.showView('chat');
+
+        if (this.state.isMobile) {
+            const sidebar = document.getElementById('sidebar');
+            const mainContent = document.getElementById('mainContent');
+            if (sidebar) sidebar.classList.add('hidden');
+            if (mainContent) mainContent.classList.remove('hidden');
         }
 
-        // Show loading
-        const container = document.getElementById('messagesContainer');
-        if (container) {
-            container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
-        }
-
-        // Highlight active group in sidebar
-        document.querySelectorAll('.group-item').forEach(el => {
-            el.classList.toggle('active', parseInt(el.dataset.groupId) === groupId);
+        document.querySelectorAll('.group-item').forEach(item => {
+            item.classList.toggle('active', String(item.dataset.groupId) === String(group.id));
         });
 
-        // Mobile: hide sidebar, show main
-        if (this.state.isMobile) {
-            document.getElementById('sidebar')?.classList.add('hidden');
-            document.getElementById('mainContent')?.classList.remove('hidden');
-        }
-
-        // Load messages
-        await this.loadMessages(groupId);
-
-        // Mark as read
-        this.markAsRead(groupId);
-
-        // Focus composer
-        const composerInput = document.getElementById('composerInput');
-        if (composerInput && !this.state.isMobile) {
-            composerInput.focus();
-        }
+        await this.loadMessages(group.id);
+        this.markAsRead(group.id);
     },
 
     async createGroup(name, type, description) {
         if (!this.isAdmin()) {
-            this.showToast('Seuls les administrateurs peuvent créer des salons', 'error');
+            this.showToast('Acces reserve aux administrateurs.', 'error');
             return;
         }
 
         try {
             const data = await this.api('groups.php?action=create', {
                 method: 'POST',
-                body: { name, type, description },
+                body: { name, type, description }
             });
-            if (data && data.group) {
-                this.state.groups.push(data.group);
-                this.renderGroupList();
-                this.showToast('Salon créé avec succès', 'success');
-                this.openGroup(data.group.id);
+            if (data.success) {
+                this.showToast('Groupe cree avec succes.', 'success');
+                await this.loadGroups();
             }
-        } catch (err) {
-            this.showToast(err.message, 'error');
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
     // =========================================================================
-    // MESSAGES
+    // 8. MESSAGES
     // =========================================================================
-    async loadMessages(groupId, before = null) {
-        let url = `messages.php?action=list&group_id=${groupId}&limit=50`;
-        if (before) url += `&before=${before}`;
+    async loadMessages(groupId, before) {
+        if (!groupId) return;
 
         try {
-            const data = await this.api(url);
-            if (!data || !data.messages) return;
+            let endpoint = 'messages.php?action=list&group_id=' + groupId + '&limit=50';
+            if (before) {
+                endpoint += '&before=' + before;
+            }
+
+            const data = await this.api(endpoint);
+            const msgs = data.messages || [];
 
             if (before) {
-                // Prepend older messages
-                this.state.messages = [...data.messages, ...this.state.messages];
-                this.renderMessages(data.messages, true);
+                this.state.messages = msgs.concat(this.state.messages);
+                this.renderMessages(msgs, true);
             } else {
-                this.state.messages = data.messages;
-                this.renderMessages(data.messages, false);
+                this.state.messages = msgs;
+                this.renderMessages(msgs, false);
+                this.scrollToBottom();
             }
 
-            if (data.messages.length > 0) {
-                this.state.lastMessageIds[groupId] =
-                    data.messages[data.messages.length - 1].id;
+            this.state.hasMoreMessages = msgs.length >= 50;
+
+            if (msgs.length > 0) {
+                this.state.lastMessageIds[groupId] = msgs[msgs.length - 1].id;
             }
-        } catch (err) {
-            const container = document.getElementById('messagesContainer');
+        } catch (e) {
+            this.showToast('Erreur lors du chargement des messages.', 'error');
+        }
+    },
+
+    async loadMoreMessages() {
+        if (this.state.isLoadingMore || !this.state.hasMoreMessages || !this.state.currentGroup) return;
+
+        this.state.isLoadingMore = true;
+        const container = document.getElementById('messagesContainer');
+        const previousHeight = container ? container.scrollHeight : 0;
+
+        const firstMsg = this.state.messages[0];
+        if (firstMsg) {
+            await this.loadMessages(this.state.currentGroup.id, firstMsg.id);
+
             if (container) {
-                container.innerHTML =
-                    '<div class="empty-state"><p>Erreur de chargement des messages</p></div>';
+                const newHeight = container.scrollHeight;
+                container.scrollTop = newHeight - previousHeight;
             }
         }
+
+        this.state.isLoadingMore = false;
     },
 
-    async loadOlderMessages() {
-        if (this.state.loadingOlder || !this.state.currentGroup) return;
-        if (this.state.messages.length === 0) return;
-
-        this.state.loadingOlder = true;
-        const oldestId = this.state.messages[0]?.id;
-
-        if (oldestId) {
-            await this.loadMessages(this.state.currentGroup.id, oldestId);
-        }
-
-        this.state.loadingOlder = false;
-    },
-
-    renderMessages(messages, prepend = false) {
+    renderMessages(messages, prepend) {
         const container = document.getElementById('messagesContainer');
         if (!container) return;
 
-        if (messages.length === 0 && !prepend) {
-            container.innerHTML =
-                '<div class="empty-state"><p>Aucun message pour le moment</p><p>Soyez le premier à écrire !</p></div>';
-            return;
+        if (!prepend) {
+            container.innerHTML = '';
         }
 
-        // Group messages by date
-        let html = '';
+        const fragment = document.createDocumentFragment();
         let lastDate = prepend ? null : '';
-        let lastAuthor = null;
 
-        messages.forEach((msg, idx) => {
-            const msgDate = new Date(msg.created_at);
-            const dateStr = this.formatDate(msgDate);
-
-            // Date separator
-            if (dateStr !== lastDate) {
-                html += `<div class="date-separator"><span>${dateStr}</span></div>`;
-                lastDate = dateStr;
-                lastAuthor = null;
+        messages.forEach(msg => {
+            const msgDate = this.formatDate(msg.created_at);
+            if (msgDate !== lastDate) {
+                const separator = document.createElement('div');
+                separator.className = 'date-separator';
+                separator.innerHTML = '<span>' + msgDate + '</span>';
+                fragment.appendChild(separator);
+                lastDate = msgDate;
             }
 
-            // Group consecutive messages from same author
-            const isConsecutive = lastAuthor === msg.user_id &&
-                idx > 0 &&
-                (new Date(msg.created_at) - new Date(messages[idx - 1]?.created_at)) < 120000;
-
-            html += this.renderMessageBubble(msg, isConsecutive);
-            lastAuthor = msg.user_id;
+            const wrapper = document.createElement('div');
+            wrapper.innerHTML = this.renderMessageBubble(msg);
+            while (wrapper.firstChild) {
+                fragment.appendChild(wrapper.firstChild);
+            }
         });
 
-        if (prepend) {
-            const scrollHeight = container.scrollHeight;
-            const scrollTop = container.scrollTop;
-            container.insertAdjacentHTML('afterbegin', html);
-            // Maintain scroll position
-            container.scrollTop = scrollTop + (container.scrollHeight - scrollHeight);
+        if (prepend && container.firstChild) {
+            container.insertBefore(fragment, container.firstChild);
         } else {
-            container.innerHTML = html;
-            this.scrollToBottom();
+            container.appendChild(fragment);
         }
     },
 
-    renderMessageBubble(msg, isConsecutive = false) {
-        const isSent = this.state.user && msg.user_id === this.state.user.id;
-        const sideClass = isSent ? 'sent' : 'received';
-        const pinnedClass = msg.is_pinned ? 'message-pinned' : '';
-        const consecutiveClass = isConsecutive ? 'consecutive' : '';
+    renderMessageBubble(msg) {
+        const isSent = msg.sender_id === this.state.user?.id;
+        const bubbleClass = isSent ? 'message-bubble sent' : 'message-bubble received';
+        const senderName = msg.is_anonymous ? 'Anonyme' : (msg.sender_name || 'Inconnu');
 
-        // Status icons for sent messages
+        let replyHtml = '';
+        if (msg.reply_to && msg.reply_message) {
+            const replyName = msg.reply_message.is_anonymous ? 'Anonyme' : (msg.reply_message.sender_name || 'Inconnu');
+            const replyContent = (msg.reply_message.content || '').substring(0, 100);
+            replyHtml = '<div class="reply-quote" onclick="App.scrollToMessage(' + msg.reply_to + ')">'
+                + '<strong>' + this.escapeHtml(replyName) + '</strong>'
+                + '<p>' + this.escapeHtml(replyContent) + '</p>'
+                + '</div>';
+        }
+
+        let attachmentsHtml = '';
+        if (msg.attachments && msg.attachments.length > 0) {
+            attachmentsHtml = '<div class="message-attachments">';
+            msg.attachments.forEach(att => {
+                if (att.type && att.type.startsWith('image/')) {
+                    attachmentsHtml += '<div class="attachment-image" onclick="App.openImageViewer(\'' + this.escapeHtml(att.url) + '\')">'
+                        + '<img src="' + this.escapeHtml(att.thumbnail || att.url) + '" alt="' + this.escapeHtml(att.name || 'Image') + '" loading="lazy">'
+                        + '</div>';
+                } else if (att.type && att.type.startsWith('video/')) {
+                    attachmentsHtml += '<div class="attachment-video">'
+                        + '<video src="' + this.escapeHtml(att.url) + '" controls preload="metadata"></video>'
+                        + '</div>';
+                } else {
+                    const fileIcon = this.getFileIcon(att.type || '');
+                    const fileSize = att.size ? this.formatFileSize(att.size) : '';
+                    attachmentsHtml += '<div class="attachment-file" onclick="App.downloadFile(\'' + this.escapeHtml(att.url) + '\', \'' + this.escapeHtml(att.name || 'fichier') + '\')">'
+                        + '<span class="file-icon">' + fileIcon + '</span>'
+                        + '<div class="file-info">'
+                        + '<span class="file-name">' + this.escapeHtml(att.name || 'Fichier') + '</span>'
+                        + '<span class="file-size">' + fileSize + '</span>'
+                        + '</div>'
+                        + '</div>';
+                }
+            });
+            attachmentsHtml += '</div>';
+        }
+
+        const content = msg.content ? this.linkify(this.escapeHtml(msg.content)) : '';
+
         let statusHtml = '';
         if (isSent) {
-            if (msg.read_count > 0) {
-                statusHtml = '<span class="message-status read" title="Lu">✓✓</span>';
-            } else if (msg.delivered_count > 0) {
-                statusHtml = '<span class="message-status delivered" title="Reçu">✓✓</span>';
-            } else {
-                statusHtml = '<span class="message-status" title="Envoyé">✓</span>';
+            switch (msg.status) {
+                case 'sent':
+                    statusHtml = '<span class="msg-status">&#10003;</span>';
+                    break;
+                case 'delivered':
+                    statusHtml = '<span class="msg-status delivered">&#10003;&#10003;</span>';
+                    break;
+                case 'read':
+                    statusHtml = '<span class="msg-status read">&#10003;&#10003;</span>';
+                    break;
+                default:
+                    statusHtml = '<span class="msg-status pending">&#8987;</span>';
             }
         }
 
-        // Reply quote
-        let replyHtml = '';
-        if (msg.parent_message) {
-            const parentContent = msg.parent_message.content || '';
-            const parentAuthor = msg.parent_message.author || msg.parent_message.author_name || '';
-            replyHtml = `<div class="message-reply" onclick="App.scrollToMessage(${msg.parent_message_id})">
-                <div class="message-reply-author">${this.escapeHtml(parentAuthor)}</div>
-                <div class="message-reply-text">${this.escapeHtml(this.truncate(parentContent, 100))}</div>
-            </div>`;
-        }
+        const editedLabel = msg.edited_at ? '<span class="edited-label">modifie</span>' : '';
+        const pinnedHtml = msg.is_pinned ? '<div class="pinned-indicator">&#128204; Epingle</div>' : '';
 
-        // Attachments
-        let attachHtml = '';
-        if (msg.attachments && msg.attachments.length > 0) {
-            attachHtml += '<div class="message-attachments">';
-            msg.attachments.forEach(att => {
-                if (att.file_type === 'image' || (att.mime_type && att.mime_type.startsWith('image/'))) {
-                    const src = att.file_path.startsWith('http') ? att.file_path : '/connect/' + att.file_path;
-                    attachHtml += `<div class="message-image-wrapper">
-                        <img class="message-image" src="${this.escapeHtml(src)}" alt="${this.escapeHtml(att.file_name || '')}" onclick="App.openImageViewer('${this.escapeHtml(src)}')" loading="lazy">
-                        ${att.caption ? `<div class="message-caption">${this.escapeHtml(att.caption)}</div>` : ''}
-                    </div>`;
-                } else if (att.file_type === 'video' || (att.mime_type && att.mime_type.startsWith('video/'))) {
-                    const src = att.file_path.startsWith('http') ? att.file_path : '/connect/' + att.file_path;
-                    attachHtml += `<div class="message-video-wrapper">
-                        <video class="message-video" controls preload="metadata" style="max-width:300px;border-radius:6px">
-                            <source src="${this.escapeHtml(src)}" type="${this.escapeHtml(att.mime_type || 'video/mp4')}">
-                        </video>
-                    </div>`;
-                } else {
-                    const src = att.file_path.startsWith('http') ? att.file_path : '/connect/' + att.file_path;
-                    const fileIcon = this.getFileIcon(att.mime_type);
-                    attachHtml += `<div class="message-file" onclick="App.downloadFile('${this.escapeHtml(src)}', '${this.escapeHtml(att.file_name || 'fichier')}')">
-                        <div class="message-file-icon">${fileIcon}</div>
-                        <div class="message-file-info">
-                            <div class="message-file-name">${this.escapeHtml(att.file_name || 'Fichier')}</div>
-                            <div class="message-file-size">${this.formatFileSize(att.file_size)}</div>
-                        </div>
-                        <div class="message-file-download">⬇</div>
-                    </div>`;
-                }
-            });
-            attachHtml += '</div>';
-        }
-
-        // Author name for received messages (skip if consecutive)
-        let authorHtml = '';
-        if (!isSent && !isConsecutive) {
-            const authorColor = this.getAuthorColor(msg.user_id);
-            authorHtml = `<div class="message-author" style="color:${authorColor}">${this.escapeHtml(msg.author_name || '')}</div>`;
-        }
-
-        // Content with link detection
-        const content = msg.content ? this.linkify(this.escapeHtml(msg.content)) : '';
-
-        // Pinned indicator
-        const pinnedIndicator = msg.is_pinned
-            ? '<div class="pinned-indicator">📌 Message épinglé</div>'
-            : '';
-
-        // Message actions (hover/tap menu)
         let actionsHtml = '<div class="message-actions">';
-        actionsHtml += `<button onclick="App.replyToMessage(${msg.id})" title="Répondre">↩</button>`;
+        actionsHtml += '<button class="msg-action-btn" onclick="App.replyToMessage(' + msg.id + ')" title="Repondre">&#8617;</button>';
+        actionsHtml += '<button class="msg-action-btn" onclick="App.forwardMessage(' + msg.id + ')" title="Transferer">&#8599;</button>';
+
         if (isSent) {
-            actionsHtml += `<button onclick="App.editMessage(${msg.id})" title="Modifier">✎</button>`;
+            actionsHtml += '<button class="msg-action-btn" onclick="App.editMessage(' + msg.id + ')" title="Modifier">&#9998;</button>';
+            actionsHtml += '<button class="msg-action-btn" onclick="App.deleteMessage(' + msg.id + ')" title="Supprimer">&#128465;</button>';
         }
-        if (isSent || this.isAdmin()) {
-            actionsHtml += `<button onclick="App.deleteMessage(${msg.id})" title="Supprimer">🗑</button>`;
-        }
-        if (!isSent) {
-            actionsHtml += `<button onclick="App.showReportModal(${msg.id})" title="Signaler">⚑</button>`;
-        }
+
         if (this.isAdmin()) {
-            const pinLabel = msg.is_pinned ? 'Désépingler' : 'Épingler';
-            const pinAction = msg.is_pinned ? 'unpinMessage' : 'pinMessage';
-            actionsHtml += `<button onclick="App.${pinAction}(${msg.id})" title="${pinLabel}">📌</button>`;
+            if (msg.is_pinned) {
+                actionsHtml += '<button class="msg-action-btn" onclick="App.unpinMessage(' + msg.id + ')" title="Desepingler">&#128204;</button>';
+            } else {
+                actionsHtml += '<button class="msg-action-btn" onclick="App.pinMessage(' + msg.id + ')" title="Epingler">&#128204;</button>';
+            }
+            if (!isSent) {
+                actionsHtml += '<button class="msg-action-btn" onclick="App.deleteMessage(' + msg.id + ')" title="Supprimer">&#128465;</button>';
+            }
         }
-        actionsHtml += `<button onclick="App.forwardMessage(${msg.id})" title="Transférer">➡</button>`;
-        actionsHtml += `<button onclick="App.showMessageInfo(${msg.id})" title="Info">ℹ</button>`;
+
+        if (!isSent) {
+            actionsHtml += '<button class="msg-action-btn" onclick="App.showReportModal(' + msg.id + ')" title="Signaler">&#9888;</button>';
+        }
+
+        if (isSent) {
+            actionsHtml += '<button class="msg-action-btn" onclick="App.showMessageInfo(' + msg.id + ')" title="Infos">&#8505;</button>';
+        }
+
         actionsHtml += '</div>';
 
-        return `<div class="message ${sideClass} ${pinnedClass} ${consecutiveClass}" id="msg-${msg.id}" data-msg-id="${msg.id}">
-            <div class="message-bubble">
-                ${pinnedIndicator}
-                ${authorHtml}
-                ${replyHtml}
-                ${attachHtml}
-                ${content ? `<div class="message-text">${content}</div>` : ''}
-                <div class="message-meta">
-                    ${msg.edited_at ? '<span class="message-edited">modifié</span>' : ''}
-                    <span class="message-time">${this.formatTime(new Date(msg.created_at))}</span>
-                    ${statusHtml}
-                </div>
-                ${actionsHtml}
-            </div>
-        </div>`;
+        let html = '<div class="' + bubbleClass + '" data-message-id="' + msg.id + '" id="msg-' + msg.id + '">';
+        html += pinnedHtml;
+        if (!isSent) {
+            html += '<div class="message-sender">' + this.escapeHtml(senderName) + '</div>';
+        }
+        html += replyHtml;
+        html += attachmentsHtml;
+        if (content) {
+            html += '<div class="message-content">' + content + '</div>';
+        }
+        html += '<div class="message-meta">';
+        html += editedLabel;
+        html += '<span class="message-time">' + this.formatTime(msg.created_at) + '</span>';
+        html += statusHtml;
+        html += '</div>';
+        html += actionsHtml;
+        html += '</div>';
+
+        return html;
     },
 
     async sendMessage() {
@@ -1118,343 +914,296 @@ const App = {
 
         const content = input.value.trim();
         if (!content && this.state.attachments.length === 0) return;
-        if (!this.state.currentGroup) return;
 
-        // Check anonymization for clinical cases
-        if (this.state.currentGroup.type === 'clinical_cases' && !this.state.anonAccepted) {
+        const group = this.state.currentGroup;
+        if (!group) return;
+
+        if (group.type === 'clinical_cases' && !this.state.anonAccepted[group.id] && this.state.attachments.length > 0) {
             this.showAnonymizationConfirmation(() => {
-                this.state.anonAccepted = true;
+                this.state.anonAccepted[group.id] = true;
                 this.sendMessage();
             });
             return;
         }
 
-        // Build FormData
+        const tempId = this.generateTempId();
         const formData = new FormData();
-        formData.append('action', 'create');
-        formData.append('group_id', this.state.currentGroup.id);
-        if (content) formData.append('content', content);
+        formData.append('group_id', group.id);
+        formData.append('content', content);
+        formData.append('temp_id', tempId);
+
         if (this.state.replyTo) {
-            formData.append('parent_message_id', this.state.replyTo.id);
-        }
-        if (this.state.csrfToken) {
-            formData.append('csrf_token', this.state.csrfToken);
+            formData.append('reply_to', this.state.replyTo);
         }
 
-        // Add attachments
-        this.state.attachments.forEach((att, i) => {
-            formData.append(`files[${i}]`, att.file);
+        if (this.state.editingMessage) {
+            formData.append('message_id', this.state.editingMessage);
+        }
+
+        this.state.attachments.forEach((att, idx) => {
+            formData.append('attachments[' + idx + ']', att.file);
             if (att.caption) {
-                formData.append(`captions[${i}]`, att.caption);
+                formData.append('captions[' + idx + ']', att.caption);
             }
         });
 
-        // Clear input immediately for responsiveness
-        const savedContent = input.value;
-        const savedReply = this.state.replyTo;
-        const savedAttachments = [...this.state.attachments];
-        input.value = '';
-        input.style.height = 'auto';
-        this.clearAttachments();
-        this.clearReply();
-
-        // Optimistic message
-        const tempId = this.generateTempId();
         const tempMsg = {
             id: tempId,
-            user_id: this.state.user.id,
-            author_name: this.state.user.first_name + ' ' + this.state.user.last_name,
+            sender_id: this.state.user.id,
+            sender_name: this.state.user.first_name + ' ' + this.state.user.last_name,
             content: content,
             created_at: new Date().toISOString(),
-            attachments: [],
-            parent_message: savedReply ? {
-                author: savedReply.author_name,
-                content: savedReply.content,
-            } : null,
-            parent_message_id: savedReply ? savedReply.id : null,
-            _temp: true,
+            status: 'sending',
+            attachments: this.state.attachments.map(a => ({
+                name: a.file.name,
+                type: a.file.type,
+                size: a.file.size,
+                url: a.preview || ''
+            })),
+            reply_to: this.state.replyTo,
+            reply_message: this.state.replyTo ? this.state.messages.find(m => m.id === this.state.replyTo) : null
         };
+
         this.state.messages.push(tempMsg);
         const container = document.getElementById('messagesContainer');
         if (container) {
-            // Remove empty state if present
-            const emptyState = container.querySelector('.empty-state');
-            if (emptyState) emptyState.remove();
-
-            container.insertAdjacentHTML('beforeend', this.renderMessageBubble(tempMsg));
-            this.scrollToBottom();
-        }
-
-        try {
-            const data = await this.api('messages.php?action=create', {
-                method: 'POST',
-                body: formData,
-            });
-
-            if (data && data.message) {
-                // Replace temp message with real one
-                const tempIdx = this.state.messages.findIndex(m => m.id === tempId);
-                if (tempIdx > -1) {
-                    this.state.messages[tempIdx] = data.message;
-                }
-                const tempEl = document.getElementById(`msg-${tempId}`);
-                if (tempEl) {
-                    tempEl.outerHTML = this.renderMessageBubble(data.message);
-                }
-                this.scrollToBottom();
+            const wrapper = document.createElement('div');
+            wrapper.innerHTML = this.renderMessageBubble(tempMsg);
+            while (wrapper.firstChild) {
+                container.appendChild(wrapper.firstChild);
             }
-        } catch (err) {
-            this.showToast('Erreur d\'envoi: ' + err.message, 'error');
-            // Remove temp message
-            this.state.messages = this.state.messages.filter(m => m.id !== tempId);
-            const tempEl = document.getElementById(`msg-${tempId}`);
-            if (tempEl) tempEl.remove();
-            // Restore input
-            input.value = savedContent;
-            this.state.replyTo = savedReply;
-            this.state.attachments = savedAttachments;
-            this.renderAttachmentPreviews();
-            if (savedReply) this.replyToMessage(savedReply.id);
         }
-    },
+        this.scrollToBottom();
 
-    async editMessage(msgId) {
-        const msg = this.state.messages.find(m => m.id === msgId);
-        if (!msg) return;
+        input.value = '';
+        input.style.height = 'auto';
+        this.clearReply();
+        this.clearAttachments();
 
-        // Show inline edit UI
-        const msgEl = document.getElementById(`msg-${msgId}`);
-        if (!msgEl) return;
-
-        const textEl = msgEl.querySelector('.message-text');
-        if (!textEl) return;
-
-        const originalContent = msg.content || '';
-        textEl.innerHTML = `<div class="edit-inline">
-            <textarea class="edit-textarea" id="editInput-${msgId}">${this.escapeHtml(originalContent)}</textarea>
-            <div class="edit-actions">
-                <button class="btn btn-sm btn-primary" onclick="App.saveEdit(${msgId})">Enregistrer</button>
-                <button class="btn btn-sm" onclick="App.cancelEdit(${msgId})">Annuler</button>
-            </div>
-        </div>`;
-
-        const editInput = document.getElementById(`editInput-${msgId}`);
-        if (editInput) {
-            editInput.focus();
-            editInput.setSelectionRange(editInput.value.length, editInput.value.length);
-            this.autoResizeTextarea(editInput);
-
-            editInput.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    this.saveEdit(msgId);
-                }
-                if (e.key === 'Escape') {
-                    this.cancelEdit(msgId);
-                }
-            });
-        }
-
-        this.state.editingMessage = msgId;
-    },
-
-    async saveEdit(msgId) {
-        const editInput = document.getElementById(`editInput-${msgId}`);
-        if (!editInput) return;
-
-        const newContent = editInput.value.trim();
-        const msg = this.state.messages.find(m => m.id === msgId);
-        if (!msg) return;
-
-        if (!newContent) {
-            this.showToast('Le message ne peut pas être vide', 'error');
-            return;
-        }
-
-        if (newContent === msg.content) {
-            this.cancelEdit(msgId);
-            return;
-        }
+        const action = this.state.editingMessage ? 'edit' : 'send';
+        this.state.editingMessage = null;
 
         try {
-            await this.api('messages.php?action=edit', {
+            const data = await this.api('messages.php?action=' + action, {
                 method: 'POST',
-                body: { message_id: msgId, content: newContent },
+                body: formData
             });
-            msg.content = newContent;
-            msg.edited_at = new Date().toISOString();
-            const el = document.getElementById(`msg-${msgId}`);
-            if (el) el.outerHTML = this.renderMessageBubble(msg);
-            this.state.editingMessage = null;
-            this.showToast('Message modifié', 'success');
-        } catch (err) {
-            this.showToast(err.message, 'error');
+
+            if (data.success && data.message) {
+                const idx = this.state.messages.findIndex(m => m.id === tempId);
+                if (idx !== -1) {
+                    this.state.messages[idx] = data.message;
+                }
+                const tempBubble = document.querySelector('[data-message-id="' + tempId + '"]');
+                if (tempBubble) {
+                    tempBubble.outerHTML = this.renderMessageBubble(data.message);
+                }
+                this.state.lastMessageIds[group.id] = data.message.id;
+            }
+        } catch (e) {
+            const tempBubble = document.querySelector('[data-message-id="' + tempId + '"]');
+            if (tempBubble) {
+                tempBubble.classList.add('failed');
+            }
+            this.showToast(e.message, 'error');
         }
     },
 
-    cancelEdit(msgId) {
-        const msg = this.state.messages.find(m => m.id === msgId);
-        if (!msg) return;
-        const el = document.getElementById(`msg-${msgId}`);
-        if (el) el.outerHTML = this.renderMessageBubble(msg);
-        this.state.editingMessage = null;
+    async editMessage(messageId) {
+        const msg = this.state.messages.find(m => m.id === messageId);
+        if (!msg || msg.sender_id !== this.state.user?.id) return;
+
+        const input = document.getElementById('composerInput');
+        if (input) {
+            input.value = msg.content || '';
+            input.focus();
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+        }
+
+        this.state.editingMessage = messageId;
+
+        const composerForm = document.getElementById('composerForm');
+        if (composerForm) {
+            let editIndicator = composerForm.querySelector('.edit-indicator');
+            if (!editIndicator) {
+                editIndicator = document.createElement('div');
+                editIndicator.className = 'edit-indicator';
+                composerForm.insertBefore(editIndicator, composerForm.firstChild);
+            }
+            editIndicator.innerHTML = '<span>Modification du message</span>'
+                + '<button onclick="App.cancelEdit()">&times;</button>';
+            editIndicator.style.display = '';
+        }
     },
 
-    async deleteMessage(msgId) {
+    cancelEdit() {
+        this.state.editingMessage = null;
+        const input = document.getElementById('composerInput');
+        if (input) {
+            input.value = '';
+            input.style.height = 'auto';
+        }
+        const indicator = document.querySelector('.edit-indicator');
+        if (indicator) indicator.style.display = 'none';
+    },
+
+    async deleteMessage(messageId) {
         if (!confirm('Supprimer ce message ?')) return;
 
         try {
-            await this.api('messages.php?action=delete', {
+            const data = await this.api('messages.php?action=delete', {
                 method: 'POST',
-                body: { message_id: msgId },
+                body: { message_id: messageId }
             });
-            this.state.messages = this.state.messages.filter(m => m.id !== msgId);
-            const el = document.getElementById(`msg-${msgId}`);
-            if (el) {
-                el.classList.add('message-removing');
-                setTimeout(() => el.remove(), 300);
+            if (data.success) {
+                this.state.messages = this.state.messages.filter(m => m.id !== messageId);
+                const bubble = document.querySelector('[data-message-id="' + messageId + '"]');
+                if (bubble) bubble.remove();
+                this.showToast('Message supprime.', 'success');
             }
-            this.showToast('Message supprimé', 'success');
-        } catch (err) {
-            this.showToast(err.message, 'error');
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
-    async pinMessage(msgId) {
+    async pinMessage(messageId) {
         try {
-            await this.api('messages.php?action=pin', {
+            const data = await this.api('messages.php?action=pin', {
                 method: 'POST',
-                body: { message_id: msgId },
+                body: { message_id: messageId }
             });
-            const msg = this.state.messages.find(m => m.id === msgId);
-            if (msg) {
-                msg.is_pinned = true;
-                const el = document.getElementById(`msg-${msgId}`);
-                if (el) el.outerHTML = this.renderMessageBubble(msg);
+            if (data.success) {
+                const msg = this.state.messages.find(m => m.id === messageId);
+                if (msg) {
+                    msg.is_pinned = true;
+                    const bubble = document.querySelector('[data-message-id="' + messageId + '"]');
+                    if (bubble) bubble.outerHTML = this.renderMessageBubble(msg);
+                }
+                this.showToast('Message epingle.', 'success');
             }
-            this.showToast('Message épinglé', 'success');
-        } catch (err) {
-            this.showToast(err.message, 'error');
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
-    async unpinMessage(msgId) {
+    async unpinMessage(messageId) {
         try {
-            await this.api('messages.php?action=unpin', {
+            const data = await this.api('messages.php?action=unpin', {
                 method: 'POST',
-                body: { message_id: msgId },
+                body: { message_id: messageId }
             });
-            const msg = this.state.messages.find(m => m.id === msgId);
-            if (msg) {
-                msg.is_pinned = false;
-                const el = document.getElementById(`msg-${msgId}`);
-                if (el) el.outerHTML = this.renderMessageBubble(msg);
+            if (data.success) {
+                const msg = this.state.messages.find(m => m.id === messageId);
+                if (msg) {
+                    msg.is_pinned = false;
+                    const bubble = document.querySelector('[data-message-id="' + messageId + '"]');
+                    if (bubble) bubble.outerHTML = this.renderMessageBubble(msg);
+                }
+                this.showToast('Message desepingle.', 'success');
             }
-            this.showToast('Message désépinglé', 'success');
-        } catch (err) {
-            this.showToast(err.message, 'error');
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
     async markAsRead(groupId) {
         try {
-            await this.api('messages.php?action=mark-read', {
+            await this.api('messages.php?action=mark_read', {
                 method: 'POST',
-                body: { group_id: groupId },
+                body: { group_id: groupId }
             });
             this.state.unreadCounts[groupId] = 0;
             this.updateUnreadBadges();
-        } catch (err) {
-            // Silently fail
+        } catch (e) {
+            /* silent */
         }
     },
 
-    async showMessageInfo(msgId) {
+    async showMessageInfo(messageId) {
         try {
-            const data = await this.api(`messages.php?action=info&message_id=${msgId}`);
-            if (!data) return;
+            const data = await this.api('messages.php?action=info&message_id=' + messageId);
+            const info = data.info || {};
 
             const modal = document.getElementById('messageInfoModal');
-            const body = modal?.querySelector('.modal-body') || document.getElementById('messageInfoBody');
-            if (!body) return;
+            if (!modal) return;
 
-            const renderList = (items, timeField) => {
-                if (!items || items.length === 0) return '<p class="text-muted">Aucun</p>';
-                return '<ul class="info-list">' + items.map(r =>
-                    `<li>
-                        <span class="info-name">${this.escapeHtml(r.name || r.first_name + ' ' + r.last_name)}</span>
-                        ${r[timeField] ? `<span class="info-time">${this.formatDateTime(new Date(r[timeField]))}</span>` : ''}
-                    </li>`
-                ).join('') + '</ul>';
-            };
+            const readList = (info.read || []).map(u =>
+                '<li>' + this.escapeHtml(u.name) + ' - ' + this.formatDateTime(u.read_at) + '</li>'
+            ).join('');
+            const deliveredList = (info.delivered || []).map(u =>
+                '<li>' + this.escapeHtml(u.name) + ' - ' + this.formatDateTime(u.delivered_at) + '</li>'
+            ).join('');
+            const notDeliveredList = (info.not_delivered || []).map(u =>
+                '<li>' + this.escapeHtml(u.name) + '</li>'
+            ).join('');
 
-            body.innerHTML = `
-                <div class="info-section">
-                    <h4>✓✓ Lu par (${data.read?.length || 0})</h4>
-                    ${renderList(data.read, 'read_at')}
-                </div>
-                <div class="info-section">
-                    <h4>✓✓ Reçu par (${data.delivered?.length || 0})</h4>
-                    ${renderList(data.delivered, 'delivered_at')}
-                </div>
-                <div class="info-section">
-                    <h4>Non reçu (${data.not_delivered?.length || 0})</h4>
-                    ${renderList(data.not_delivered, null)}
-                </div>`;
+            const content = modal.querySelector('.modal-content') || modal;
+            content.innerHTML = '<div class="modal-header">'
+                + '<h3>Informations du message</h3>'
+                + '<button class="modal-close" onclick="App.hideModal(\'messageInfoModal\')">&times;</button>'
+                + '</div>'
+                + '<div class="modal-body">'
+                + '<div class="info-section">'
+                + '<h4>Lu par (' + (info.read?.length || 0) + ')</h4>'
+                + '<ul>' + (readList || '<li>Aucun</li>') + '</ul>'
+                + '</div>'
+                + '<div class="info-section">'
+                + '<h4>Delivre a (' + (info.delivered?.length || 0) + ')</h4>'
+                + '<ul>' + (deliveredList || '<li>Aucun</li>') + '</ul>'
+                + '</div>'
+                + '<div class="info-section">'
+                + '<h4>Non delivre (' + (info.not_delivered?.length || 0) + ')</h4>'
+                + '<ul>' + (notDeliveredList || '<li>Aucun</li>') + '</ul>'
+                + '</div>'
+                + '</div>';
 
             this.showModal('messageInfoModal');
-        } catch (err) {
-            this.showToast(err.message, 'error');
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
-    replyToMessage(msgId) {
-        const msg = this.state.messages.find(m => m.id === msgId);
+    replyToMessage(messageId) {
+        const msg = this.state.messages.find(m => m.id === messageId);
         if (!msg) return;
 
-        this.state.replyTo = msg;
-        let replyBar = document.getElementById('replyBar');
-        if (!replyBar) {
-            // Create reply bar above composer
-            const composerForm = document.getElementById('composerForm');
-            if (composerForm) {
-                replyBar = document.createElement('div');
-                replyBar.id = 'replyBar';
-                composerForm.parentNode.insertBefore(replyBar, composerForm);
+        this.state.replyTo = messageId;
+
+        const composerForm = document.getElementById('composerForm');
+        if (composerForm) {
+            let replyPreview = composerForm.querySelector('.reply-preview');
+            if (!replyPreview) {
+                replyPreview = document.createElement('div');
+                replyPreview.className = 'reply-preview';
+                composerForm.insertBefore(replyPreview, composerForm.firstChild);
             }
+
+            const senderName = msg.is_anonymous ? 'Anonyme' : (msg.sender_name || 'Inconnu');
+            replyPreview.innerHTML = '<div class="reply-preview-content">'
+                + '<strong>' + this.escapeHtml(senderName) + '</strong>'
+                + '<p>' + this.escapeHtml((msg.content || '').substring(0, 80)) + '</p>'
+                + '</div>'
+                + '<button onclick="App.clearReply()">&times;</button>';
+            replyPreview.style.display = '';
         }
 
-        if (replyBar) {
-            replyBar.innerHTML = `<div class="reply-preview">
-                <div class="reply-preview-bar"></div>
-                <div class="reply-preview-content">
-                    <div class="reply-preview-author">${this.escapeHtml(msg.author_name || '')}</div>
-                    <div class="reply-preview-text">${this.escapeHtml(this.truncate(msg.content || '', 80))}</div>
-                </div>
-                <button class="reply-close" onclick="App.clearReply()" title="Annuler la réponse">✕</button>
-            </div>`;
-            replyBar.classList.remove('hidden');
-        }
-
-        const composerInput = document.getElementById('composerInput');
-        if (composerInput) composerInput.focus();
+        const input = document.getElementById('composerInput');
+        if (input) input.focus();
     },
 
     clearReply() {
         this.state.replyTo = null;
-        const replyBar = document.getElementById('replyBar');
-        if (replyBar) {
-            replyBar.innerHTML = '';
-            replyBar.classList.add('hidden');
-        }
+        const replyPreview = document.querySelector('.reply-preview');
+        if (replyPreview) replyPreview.style.display = 'none';
     },
 
-    scrollToMessage(msgId) {
-        const el = document.getElementById(`msg-${msgId}`);
-        if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            el.classList.add('highlight');
-            setTimeout(() => el.classList.remove('highlight'), 2000);
+    scrollToMessage(messageId) {
+        const bubble = document.getElementById('msg-' + messageId);
+        if (bubble) {
+            bubble.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            bubble.classList.add('highlight');
+            setTimeout(() => bubble.classList.remove('highlight'), 2000);
         }
     },
 
@@ -1467,168 +1216,64 @@ const App = {
         }
     },
 
-    async forwardMessage(msgId) {
-        const msg = this.state.messages.find(m => m.id === msgId);
+    async forwardMessage(messageId) {
+        const msg = this.state.messages.find(m => m.id === messageId);
         if (!msg) return;
 
-        // Show group selection for forwarding
-        const groups = this.state.groups.filter(g =>
-            !this.state.currentGroup || g.id !== this.state.currentGroup.id
-        );
-        if (groups.length === 0) {
-            this.showToast('Aucun autre salon disponible', 'error');
+        const targetGroups = this.state.groups.filter(g => g.id !== this.state.currentGroup?.id);
+        const groupNames = targetGroups.map((g, i) => (i + 1) + '. ' + g.name).join('\n');
+
+        const choice = prompt('Transferer vers quel groupe ?\n' + groupNames);
+        if (!choice) return;
+
+        const idx = parseInt(choice) - 1;
+        const targetGroup = targetGroups[idx];
+        if (!targetGroup) {
+            this.showToast('Groupe invalide.', 'error');
             return;
         }
 
-        let html = '<div class="forward-dialog"><h4>Transférer vers :</h4><div class="forward-list">';
-        groups.forEach(g => {
-            html += `<div class="forward-item" onclick="App.doForwardMessage(${msgId}, ${g.id})">
-                <span>${this.escapeHtml(g.name)}</span>
-            </div>`;
-        });
-        html += '</div></div>';
-
-        // Use a temporary modal
-        let forwardModal = document.getElementById('forwardModal');
-        if (!forwardModal) {
-            forwardModal = document.createElement('div');
-            forwardModal.id = 'forwardModal';
-            forwardModal.className = 'modal-overlay';
-            forwardModal.innerHTML = `<div class="modal">
-                <div class="modal-header">
-                    <h3>Transférer le message</h3>
-                    <button class="modal-close" onclick="App.hideModal('forwardModal')">✕</button>
-                </div>
-                <div class="modal-body" id="forwardModalBody"></div>
-            </div>`;
-            document.body.appendChild(forwardModal);
-        }
-
-        document.getElementById('forwardModalBody').innerHTML = html;
-        this.showModal('forwardModal');
-    },
-
-    async doForwardMessage(msgId, targetGroupId) {
         try {
-            await this.api('messages.php?action=forward', {
+            const data = await this.api('messages.php?action=forward', {
                 method: 'POST',
-                body: { message_id: msgId, target_group_id: targetGroupId },
+                body: {
+                    message_id: messageId,
+                    target_group_id: targetGroup.id
+                }
             });
-            this.hideModal('forwardModal');
-            this.showToast('Message transféré', 'success');
-        } catch (err) {
-            this.showToast(err.message, 'error');
-        }
-    },
-
-    showMessageContextMenu(msgId, x, y) {
-        // Remove existing context menu
-        const existing = document.getElementById('contextMenu');
-        if (existing) existing.remove();
-
-        const msg = this.state.messages.find(m => m.id === msgId);
-        if (!msg) return;
-
-        const isSent = this.state.user && msg.user_id === this.state.user.id;
-
-        let menuHtml = '<div id="contextMenu" class="context-menu" style="top:' + y + 'px;left:' + x + 'px">';
-        menuHtml += `<div class="context-item" onclick="App.replyToMessage(${msgId});document.getElementById('contextMenu')?.remove()">↩ Répondre</div>`;
-        menuHtml += `<div class="context-item" onclick="App.forwardMessage(${msgId});document.getElementById('contextMenu')?.remove()">➡ Transférer</div>`;
-        if (msg.content) {
-            menuHtml += `<div class="context-item" onclick="App.copyToClipboard('${this.escapeHtml(msg.content.replace(/'/g, "\\'"))}');document.getElementById('contextMenu')?.remove()">📋 Copier</div>`;
-        }
-        if (isSent) {
-            menuHtml += `<div class="context-item" onclick="App.editMessage(${msgId});document.getElementById('contextMenu')?.remove()">✎ Modifier</div>`;
-            menuHtml += `<div class="context-item danger" onclick="App.deleteMessage(${msgId});document.getElementById('contextMenu')?.remove()">🗑 Supprimer</div>`;
-        } else {
-            menuHtml += `<div class="context-item" onclick="App.showReportModal(${msgId});document.getElementById('contextMenu')?.remove()">⚑ Signaler</div>`;
-        }
-        if (this.isAdmin()) {
-            const pinLabel = msg.is_pinned ? '📌 Désépingler' : '📌 Épingler';
-            const pinAction = msg.is_pinned ? 'unpinMessage' : 'pinMessage';
-            menuHtml += `<div class="context-item" onclick="App.${pinAction}(${msgId});document.getElementById('contextMenu')?.remove()">${pinLabel}</div>`;
-        }
-        menuHtml += `<div class="context-item" onclick="App.showMessageInfo(${msgId});document.getElementById('contextMenu')?.remove()">ℹ Info</div>`;
-        menuHtml += '</div>';
-
-        document.body.insertAdjacentHTML('beforeend', menuHtml);
-
-        // Adjust position if off screen
-        const menu = document.getElementById('contextMenu');
-        if (menu) {
-            const rect = menu.getBoundingClientRect();
-            if (rect.right > window.innerWidth) {
-                menu.style.left = (window.innerWidth - rect.width - 10) + 'px';
+            if (data.success) {
+                this.showToast('Message transfere vers ' + targetGroup.name + '.', 'success');
             }
-            if (rect.bottom > window.innerHeight) {
-                menu.style.top = (window.innerHeight - rect.height - 10) + 'px';
-            }
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
-    },
-
-    getAuthorColor(userId) {
-        const colors = [
-            '#e17055', '#00b894', '#0984e3', '#6c5ce7',
-            '#fdcb6e', '#e84393', '#00cec9', '#ff7675',
-            '#74b9ff', '#a29bfe', '#55efc4', '#fab1a0',
-        ];
-        return colors[(userId || 0) % colors.length];
     },
 
     // =========================================================================
-    // ATTACHMENTS
+    // 9. ATTACHMENTS
     // =========================================================================
-    handleAttachment(files, type) {
-        const maxFiles = 10;
-        if (this.state.attachments.length + files.length > maxFiles) {
-            this.showToast(`Maximum ${maxFiles} fichiers par message`, 'error');
+    handleAttachment(file, type) {
+        const maxSize = type === 'photo' ? 10 * 1024 * 1024 : 25 * 1024 * 1024;
+        if (file.size > maxSize) {
+            const maxLabel = type === 'photo' ? '10 Mo' : '25 Mo';
+            this.showToast('Fichier trop volumineux. Maximum : ' + maxLabel, 'error');
             return;
         }
 
-        Array.from(files).forEach(file => {
-            const maxSize = type === 'image' ? 20 * 1024 * 1024 : 100 * 1024 * 1024;
-            if (file.size > maxSize) {
-                this.showToast(
-                    `"${file.name}" est trop volumineux (max ${this.formatFileSize(maxSize)})`,
-                    'error'
-                );
-                return;
-            }
+        const attachment = { file: file, type: type, id: this.generateTempId(), caption: '' };
 
-            // Validate file type
-            const allowedImageTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-            const blockedTypes = ['application/x-executable', 'application/x-msdownload'];
-            if (type === 'image' && !allowedImageTypes.includes(file.type)) {
-                this.showToast('Type d\'image non supporté', 'error');
-                return;
-            }
-            if (blockedTypes.includes(file.type)) {
-                this.showToast('Type de fichier non autorisé', 'error');
-                return;
-            }
-
-            this.state.attachments.push({
-                file: file,
-                type: file.type.startsWith('image/') ? 'image' : 'file',
-                caption: '',
-                preview: null,
-            });
-
-            // Generate preview for images
-            if (file.type.startsWith('image/')) {
-                const reader = new FileReader();
-                const idx = this.state.attachments.length - 1;
-                reader.onload = (e) => {
-                    if (this.state.attachments[idx]) {
-                        this.state.attachments[idx].preview = e.target.result;
-                        this.renderAttachmentPreviews();
-                    }
-                };
-                reader.readAsDataURL(file);
-            }
-        });
-
-        this.renderAttachmentPreviews();
+        if (file.type.startsWith('image/')) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                attachment.preview = e.target.result;
+                this.state.attachments.push(attachment);
+                this.renderAttachmentPreviews();
+            };
+            reader.readAsDataURL(file);
+        } else {
+            this.state.attachments.push(attachment);
+            this.renderAttachmentPreviews();
+        }
     },
 
     renderAttachmentPreviews() {
@@ -1636,39 +1281,42 @@ const App = {
         if (!container) return;
 
         if (this.state.attachments.length === 0) {
-            container.classList.add('hidden');
+            container.style.display = 'none';
             container.innerHTML = '';
             return;
         }
 
-        container.classList.remove('hidden');
-        container.innerHTML = this.state.attachments
-            .map((att, i) => {
-                if (att.type === 'image' || att.file.type.startsWith('image/')) {
-                    const src = att.preview || URL.createObjectURL(att.file);
-                    return `<div class="attachment-preview" data-index="${i}">
-                        <img src="${src}" alt="${this.escapeHtml(att.file.name)}">
-                        <button class="remove" onclick="App.removeAttachment(${i})" title="Retirer">✕</button>
-                        <input type="text" class="attachment-caption" placeholder="Ajouter une légende..."
-                            value="${this.escapeHtml(att.caption)}"
-                            onchange="App.state.attachments[${i}].caption=this.value">
-                    </div>`;
-                } else {
-                    return `<div class="attachment-file-preview" data-index="${i}">
-                        <div class="message-file-icon">${this.getFileIcon(att.file.type)}</div>
-                        <div class="attachment-file-info">
-                            <div class="attachment-file-name">${this.escapeHtml(att.file.name)}</div>
-                            <div class="attachment-file-size">${this.formatFileSize(att.file.size)}</div>
-                        </div>
-                        <button class="remove" onclick="App.removeAttachment(${i})" title="Retirer">✕</button>
-                    </div>`;
-                }
-            })
-            .join('');
+        container.style.display = '';
+        let html = '';
+        this.state.attachments.forEach(att => {
+            if (att.preview) {
+                html += '<div class="attachment-preview-item" data-att-id="' + att.id + '">'
+                    + '<img src="' + att.preview + '" alt="' + this.escapeHtml(att.file.name) + '">'
+                    + '<input type="text" class="attachment-caption" placeholder="Legende..."'
+                    + ' value="' + this.escapeHtml(att.caption) + '"'
+                    + ' onchange="App.updateAttachmentCaption(\'' + att.id + '\', this.value)">'
+                    + '<button class="remove-attachment" onclick="App.removeAttachment(\'' + att.id + '\')">&times;</button>'
+                    + '</div>';
+            } else {
+                const icon = this.getFileIcon(att.file.type);
+                html += '<div class="attachment-preview-item file-preview" data-att-id="' + att.id + '">'
+                    + '<span class="preview-file-icon">' + icon + '</span>'
+                    + '<span class="preview-file-name">' + this.escapeHtml(att.file.name) + '</span>'
+                    + '<span class="preview-file-size">' + this.formatFileSize(att.file.size) + '</span>'
+                    + '<button class="remove-attachment" onclick="App.removeAttachment(\'' + att.id + '\')">&times;</button>'
+                    + '</div>';
+            }
+        });
+        container.innerHTML = html;
     },
 
-    removeAttachment(index) {
-        this.state.attachments.splice(index, 1);
+    updateAttachmentCaption(attId, caption) {
+        const att = this.state.attachments.find(a => a.id === attId);
+        if (att) att.caption = caption;
+    },
+
+    removeAttachment(attId) {
+        this.state.attachments = this.state.attachments.filter(a => a.id !== attId);
         this.renderAttachmentPreviews();
     },
 
@@ -1678,201 +1326,153 @@ const App = {
     },
 
     // =========================================================================
-    // IMAGE VIEWER
+    // 10. IMAGE VIEWER
     // =========================================================================
-    openImageViewer(src) {
+    openImageViewer(url) {
         const viewer = document.getElementById('imageViewer');
-        const img = document.getElementById('viewerImage');
-        if (viewer && img) {
-            img.src = src;
-            img.alt = 'Image en plein écran';
-            viewer.classList.remove('hidden');
+        const viewerImage = document.getElementById('viewerImage');
+        if (viewer && viewerImage) {
+            viewerImage.src = url;
+            viewer.style.display = 'flex';
             document.body.style.overflow = 'hidden';
-
-            // Keyboard navigation
-            this._viewerKeyHandler = (e) => {
-                if (e.key === 'Escape') this.closeImageViewer();
-            };
-            document.addEventListener('keydown', this._viewerKeyHandler);
         }
     },
 
     closeImageViewer() {
         const viewer = document.getElementById('imageViewer');
         if (viewer) {
-            viewer.classList.add('hidden');
+            viewer.style.display = 'none';
             document.body.style.overflow = '';
-            if (this._viewerKeyHandler) {
-                document.removeEventListener('keydown', this._viewerKeyHandler);
-                this._viewerKeyHandler = null;
-            }
         }
     },
 
     downloadFile(url, filename) {
         const a = document.createElement('a');
         a.href = url;
-        a.download = filename || 'download';
-        a.style.display = 'none';
+        a.download = filename || 'fichier';
+        a.target = '_blank';
         document.body.appendChild(a);
         a.click();
-        setTimeout(() => a.remove(), 100);
+        document.body.removeChild(a);
     },
 
     // =========================================================================
-    // POLLING
+    // 11. POLLING
     // =========================================================================
     startPolling() {
         this.stopPolling();
-        this.state.polling = setInterval(() => this.pollUpdates(), 3000);
+        this.state.pollingInterval = setInterval(() => {
+            this.pollUpdates();
+        }, 3000);
     },
 
     stopPolling() {
-        if (this.state.polling) {
-            clearInterval(this.state.polling);
-            this.state.polling = null;
+        if (this.state.pollingInterval) {
+            clearInterval(this.state.pollingInterval);
+            this.state.pollingInterval = null;
         }
     },
 
     async pollUpdates() {
         try {
-            // Poll unread counts
-            const countData = await this.api('notifications.php?action=unread-counts');
-            if (countData && countData.counts) {
-                const oldCounts = { ...this.state.unreadCounts };
-                this.state.unreadCounts = countData.counts;
-                this.updateUnreadBadges();
+            const params = new URLSearchParams({ action: 'poll' });
 
-                // Detect new unreads in non-current groups for notification
-                for (const [groupId, count] of Object.entries(countData.counts)) {
-                    const gId = parseInt(groupId);
-                    if (this.state.currentGroup && gId === this.state.currentGroup.id) continue;
-                    if (count > (oldCounts[groupId] || 0)) {
-                        // New message in another group - update group list preview
-                        this.refreshGroupPreview(gId);
-                    }
-                }
+            Object.entries(this.state.lastMessageIds).forEach(([gid, mid]) => {
+                params.append('last_ids[' + gid + ']', mid);
+            });
+
+            if (this.state.currentGroup) {
+                params.append('current_group', this.state.currentGroup.id);
             }
 
-            // Poll new messages in current group
-            if (this.state.currentGroup) {
-                const lastId = this.state.messages.length > 0
-                    ? Math.max(...this.state.messages.filter(m => !m._temp).map(m => m.id))
-                    : 0;
+            const data = await this.api('messages.php?' + params.toString());
 
-                const msgData = await this.api(
-                    `messages.php?action=list&group_id=${this.state.currentGroup.id}&after=${lastId}&limit=50`
-                );
+            if (data.unread_counts) {
+                this.state.unreadCounts = data.unread_counts;
+                this.updateUnreadBadges();
+            }
 
-                if (msgData && msgData.messages && msgData.messages.length > 0) {
-                    const container = document.getElementById('messagesContainer');
-                    const isNearBottom = container
-                        ? container.scrollHeight - container.scrollTop - container.clientHeight < 200
-                        : false;
+            if (data.new_messages && data.new_messages.length > 0 && this.state.currentGroup) {
+                const container = document.getElementById('messagesContainer');
+                const isNearBottom = container
+                    ? (container.scrollHeight - container.scrollTop - container.clientHeight) < 100
+                    : false;
 
-                    msgData.messages.forEach(msg => {
-                        // Skip if we already have this message (or it's our own temp message)
-                        if (this.state.messages.find(m => m.id === msg.id)) return;
-
+                data.new_messages.forEach(msg => {
+                    const exists = this.state.messages.find(m => m.id === msg.id);
+                    if (!exists) {
                         this.state.messages.push(msg);
                         if (container) {
-                            // Remove empty state
-                            const emptyState = container.querySelector('.empty-state');
-                            if (emptyState) emptyState.remove();
-
-                            container.insertAdjacentHTML(
-                                'beforeend',
-                                this.renderMessageBubble(msg)
-                            );
+                            const wrapper = document.createElement('div');
+                            wrapper.innerHTML = this.renderMessageBubble(msg);
+                            while (wrapper.firstChild) {
+                                container.appendChild(wrapper.firstChild);
+                            }
                         }
-                    });
-
-                    // Auto scroll if user was near bottom
-                    if (isNearBottom) {
-                        this.scrollToBottom();
-                    } else if (msgData.messages.length > 0) {
-                        // Show "new messages" indicator
-                        this.showNewMessageIndicator(msgData.messages.length);
                     }
+                });
 
-                    // Mark as read if we're viewing
-                    if (!document.hidden) {
-                        this.markAsRead(this.state.currentGroup.id);
-                    }
+                const lastNew = data.new_messages[data.new_messages.length - 1];
+                if (lastNew) {
+                    this.state.lastMessageIds[this.state.currentGroup.id] = lastNew.id;
+                }
+
+                if (isNearBottom) {
+                    this.scrollToBottom();
+                }
+
+                if (this.state.currentGroup) {
+                    this.markAsRead(this.state.currentGroup.id);
                 }
             }
-        } catch (err) {
-            // Silently fail - polling will retry
-        }
-    },
 
-    showNewMessageIndicator(count) {
-        let indicator = document.getElementById('newMsgIndicator');
-        if (!indicator) {
-            indicator = document.createElement('div');
-            indicator.id = 'newMsgIndicator';
-            indicator.className = 'new-message-indicator';
-            const container = document.getElementById('messagesContainer');
-            if (container) container.parentNode.appendChild(indicator);
-        }
-        indicator.textContent = `↓ ${count} nouveau${count > 1 ? 'x' : ''} message${count > 1 ? 's' : ''}`;
-        indicator.classList.remove('hidden');
-        indicator.onclick = () => {
-            this.scrollToBottom();
-            indicator.classList.add('hidden');
-        };
-    },
-
-    async refreshGroupPreview(groupId) {
-        try {
-            const data = await this.api(`groups.php?action=info&group_id=${groupId}`);
-            if (data && data.group) {
-                const idx = this.state.groups.findIndex(g => g.id === groupId);
-                if (idx > -1) {
-                    this.state.groups[idx] = { ...this.state.groups[idx], ...data.group };
-                    this.renderGroupList();
-                }
+            if (data.groups) {
+                this.state.groups = data.groups;
+                this.renderGroupList();
             }
-        } catch (err) {
-            // Silently fail
+        } catch (e) {
+            /* silent polling failure */
         }
     },
 
     updateUnreadBadges() {
-        // Update group item badges
-        this.state.groups.forEach(g => {
-            const count = this.state.unreadCounts[g.id] || 0;
-            const badgeEl = document.querySelector(
-                `.group-item[data-group-id="${g.id}"] .group-badge`
-            );
-            if (badgeEl) {
-                badgeEl.textContent = count > 99 ? '99+' : count;
-                badgeEl.style.display = count > 0 ? '' : 'none';
+        document.querySelectorAll('.group-item').forEach(item => {
+            const gid = item.dataset.groupId;
+            const badge = item.querySelector('.unread-badge');
+            const count = this.state.unreadCounts[gid] || 0;
+
+            if (count > 0) {
+                if (badge) {
+                    badge.textContent = count > 99 ? '99+' : count;
+                    badge.style.display = '';
+                } else {
+                    const previewRow = item.querySelector('.group-preview-row');
+                    if (previewRow) {
+                        const newBadge = document.createElement('span');
+                        newBadge.className = 'unread-badge';
+                        newBadge.textContent = count > 99 ? '99+' : count;
+                        previewRow.appendChild(newBadge);
+                    }
+                }
+            } else if (badge) {
+                badge.style.display = 'none';
             }
         });
 
-        // Update global notification badge
-        const total = Object.values(this.state.unreadCounts).reduce(
-            (sum, c) => sum + (parseInt(c) || 0),
-            0
-        );
+        const totalUnread = Object.values(this.state.unreadCounts).reduce((sum, c) => sum + (c || 0), 0);
         const globalBadge = document.getElementById('notifBadge');
         if (globalBadge) {
-            globalBadge.textContent = total > 99 ? '99+' : total;
-            globalBadge.style.display = total > 0 ? '' : 'none';
+            if (totalUnread > 0) {
+                globalBadge.textContent = totalUnread > 99 ? '99+' : totalUnread;
+                globalBadge.style.display = '';
+            } else {
+                globalBadge.style.display = 'none';
+            }
         }
 
-        // Update page title
-        if (total > 0) {
-            document.title = `(${total}) NADAR Connect`;
-        } else {
-            document.title = 'NADAR Connect';
-        }
-
-        // PWA badge
         if ('setAppBadge' in navigator) {
-            if (total > 0) {
-                navigator.setAppBadge(total).catch(() => {});
+            if (totalUnread > 0) {
+                navigator.setAppBadge(totalUnread).catch(() => {});
             } else {
                 navigator.clearAppBadge().catch(() => {});
             }
@@ -1880,1593 +1480,1233 @@ const App = {
     },
 
     // =========================================================================
-    // SEARCH
+    // 12. SEARCH
     // =========================================================================
     async search(query) {
-        if (!query || query.length < 2) {
-            const container = document.getElementById('searchResults');
-            if (container) container.innerHTML = '';
+        if (!query || query.trim().length < 2) {
+            this.renderSearchResults({ messages: [], members: [] });
             return;
         }
 
         try {
-            const data = await this.api(
-                `search.php?action=search&q=${encodeURIComponent(query)}`
-            );
+            const data = await this.api('search.php?q=' + encodeURIComponent(query.trim()));
             this.renderSearchResults(data);
-        } catch (err) {
-            // Silently fail
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
-    renderSearchResults(data) {
+    renderSearchResults(results) {
         const container = document.getElementById('searchResults');
-        if (!container || !data) return;
+        if (!container) return;
 
         let html = '';
+        const messages = results.messages || [];
+        const members = results.members || [];
 
-        // Messages results
-        if (data.messages && data.messages.length > 0) {
-            html += '<div class="search-section"><h4>Messages</h4>';
-            data.messages.forEach(m => {
-                const groupName = m.group_name || '';
-                const content = m.content || '';
-                const author = m.author_name || '';
-                const time = m.created_at ? this.timeAgo(new Date(m.created_at)) : '';
-
-                html += `<div class="search-result-item" onclick="App.navigateToMessage(${m.group_id}, ${m.id})">
-                    <div class="search-result-group">${this.escapeHtml(groupName)}</div>
-                    <div class="search-result-text">${this.highlightText(this.escapeHtml(this.truncate(content, 120)), document.getElementById('searchInput')?.value || '')}</div>
-                    <div class="search-result-meta">${this.escapeHtml(author)} · ${time}</div>
-                </div>`;
-            });
-            html += '</div>';
+        if (messages.length === 0 && members.length === 0) {
+            html = '<div class="search-empty">Aucun resultat trouve.</div>';
         }
 
-        // Members results
-        if (data.members && data.members.length > 0) {
+        if (members.length > 0) {
             html += '<div class="search-section"><h4>Membres</h4>';
-            data.members.forEach(m => {
-                const name = (m.first_name || '') + ' ' + (m.last_name || '');
-                const info = [m.city, m.institution].filter(Boolean).join(' · ');
-
-                html += `<div class="search-result-item">
-                    <div class="search-result-text">${this.escapeHtml(name.trim())}</div>
-                    ${info ? `<div class="search-result-meta">${this.escapeHtml(info)}</div>` : ''}
-                </div>`;
+            members.forEach(member => {
+                const initials = (member.first_name?.[0] || '') + (member.last_name?.[0] || '');
+                const avatar = member.avatar
+                    ? '<img src="' + this.escapeHtml(member.avatar) + '" alt="">'
+                    : '<span class="avatar-initials">' + this.escapeHtml(initials) + '</span>';
+                html += '<div class="search-result-item member-result">'
+                    + '<div class="search-avatar">' + avatar + '</div>'
+                    + '<div>'
+                    + '<div class="search-name">' + this.escapeHtml(member.first_name + ' ' + member.last_name) + '</div>'
+                    + '<div class="search-meta">' + this.escapeHtml(member.city || '') + '</div>'
+                    + '</div>'
+                    + '</div>';
             });
             html += '</div>';
         }
 
-        // Documents results
-        if (data.documents && data.documents.length > 0) {
-            html += '<div class="search-section"><h4>Documents</h4>';
-            data.documents.forEach(d => {
-                html += `<div class="search-result-item" onclick="App.showView('libraryView')">
-                    <div class="search-result-text">${this.getFileIcon(d.mime_type)} ${this.escapeHtml(d.title || d.file_name)}</div>
-                    <div class="search-result-meta">${this.formatFileSize(d.file_size)}</div>
-                </div>`;
+        if (messages.length > 0) {
+            html += '<div class="search-section"><h4>Messages</h4>';
+            messages.forEach(msg => {
+                const senderName = msg.is_anonymous ? 'Anonyme' : (msg.sender_name || 'Inconnu');
+                const preview = (msg.content || '').substring(0, 100);
+                html += '<div class="search-result-item message-result" onclick="App.openGroupAndScrollToMessage(' + msg.group_id + ', ' + msg.id + ')">'
+                    + '<div>'
+                    + '<div class="search-name">' + this.escapeHtml(senderName) + '</div>'
+                    + '<div class="search-preview">' + this.escapeHtml(preview) + '</div>'
+                    + '<div class="search-meta">' + this.escapeHtml(msg.group_name || '') + ' - ' + this.timeAgo(msg.created_at) + '</div>'
+                    + '</div>'
+                    + '</div>';
             });
             html += '</div>';
-        }
-
-        if (!html) {
-            html = '<div class="search-empty"><p>Aucun résultat pour cette recherche</p></div>';
         }
 
         container.innerHTML = html;
     },
 
-    highlightText(text, query) {
-        if (!query || query.length < 2) return text;
-        const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const regex = new RegExp(`(${escapedQuery})`, 'gi');
-        return text.replace(regex, '<mark>$1</mark>');
-    },
-
-    async navigateToMessage(groupId, msgId) {
+    async openGroupAndScrollToMessage(groupId, messageId) {
+        const group = this.state.groups.find(g => g.id === groupId || g.id === parseInt(groupId));
+        if (group) {
+            await this.openGroup(group);
+            setTimeout(() => this.scrollToMessage(messageId), 500);
+        }
         this.hideSearch();
-        await this.openGroup(groupId);
-        // Wait for messages to render, then scroll
-        setTimeout(() => this.scrollToMessage(msgId), 500);
     },
 
     showSearch() {
         const overlay = document.getElementById('searchOverlay');
         if (overlay) {
-            overlay.classList.remove('hidden');
+            overlay.style.display = 'flex';
             const input = document.getElementById('searchInput');
             if (input) {
                 input.value = '';
                 input.focus();
             }
-            document.getElementById('searchResults').innerHTML = '';
+            this.renderSearchResults({ messages: [], members: [] });
         }
     },
 
     hideSearch() {
         const overlay = document.getElementById('searchOverlay');
-        if (overlay) {
-            overlay.classList.add('hidden');
-        }
-        const input = document.getElementById('searchInput');
-        if (input) input.value = '';
-        const results = document.getElementById('searchResults');
-        if (results) results.innerHTML = '';
+        if (overlay) overlay.style.display = 'none';
     },
 
     // =========================================================================
-    // LIBRARY (Documents)
+    // 13. LIBRARY
     // =========================================================================
-    async loadDocuments(category = '') {
+    async loadDocuments(category) {
+        if (category !== undefined) {
+            this.state.docCategory = category;
+        }
+
         try {
-            let url = 'documents.php?action=list';
-            if (category) url += `&category=${encodeURIComponent(category)}`;
-            const data = await this.api(url);
-            this.renderLibrary(data?.documents || [], data?.categories || []);
-        } catch (err) {
-            this.showToast('Erreur de chargement des documents', 'error');
+            let endpoint = 'documents.php?action=list';
+            if (this.state.docCategory) {
+                endpoint += '&category=' + encodeURIComponent(this.state.docCategory);
+            }
+            const data = await this.api(endpoint);
+            this.state.documents = data.documents || [];
+            this.renderLibrary();
+        } catch (e) {
+            this.showToast('Erreur lors du chargement des documents.', 'error');
         }
     },
 
-    renderLibrary(docs, categories) {
-        const container = document.getElementById('libraryContent');
-        if (!container) return;
+    renderLibrary() {
+        const view = document.getElementById('libraryView');
+        if (!view) return;
 
-        let html = '<div class="library-header">';
-        html += '<h2>Bibliothèque</h2>';
-
-        // Category filter
-        if (categories && categories.length > 0) {
-            html += '<div class="library-filters">';
-            html += `<button class="filter-btn active" onclick="App.filterDocuments('')">Tous</button>`;
-            categories.forEach(cat => {
-                html += `<button class="filter-btn" onclick="App.filterDocuments('${this.escapeHtml(cat)}')">${this.escapeHtml(cat)}</button>`;
-            });
-            html += '</div>';
-        }
-
-        // Upload button for admins
-        if (this.isAdmin()) {
-            html += `<button class="btn btn-primary" onclick="App.showUploadDocumentModal()">
-                <span>+</span> Ajouter un document
-            </button>`;
-        }
-        html += '</div>';
-
-        if (docs.length === 0) {
-            html += '<div class="empty-state"><p>Aucun document pour le moment</p></div>';
-        } else {
-            html += '<div class="library-grid">';
-            docs.forEach(doc => {
-                const icon = this.getFileIcon(doc.mime_type);
-                const date = doc.created_at ? this.formatDate(new Date(doc.created_at)) : '';
-                const size = this.formatFileSize(doc.file_size);
-                const path = doc.file_path?.startsWith('http') ? doc.file_path : '/connect/' + doc.file_path;
-
-                html += `<div class="doc-card">
-                    <div class="doc-icon">${icon}</div>
-                    <div class="doc-info">
-                        <div class="doc-title">${this.escapeHtml(doc.title || doc.file_name)}</div>
-                        ${doc.category ? `<div class="doc-category">${this.escapeHtml(doc.category)}</div>` : ''}
-                        ${doc.description ? `<div class="doc-description">${this.escapeHtml(this.truncate(doc.description, 100))}</div>` : ''}
-                        <div class="doc-meta">
-                            <span>${size}</span>
-                            <span>${date}</span>
-                            ${doc.author_name ? `<span>par ${this.escapeHtml(doc.author_name)}</span>` : ''}
-                        </div>
-                        <div class="doc-actions">
-                            <button class="btn btn-sm btn-primary" onclick="App.downloadFile('${this.escapeHtml(path)}', '${this.escapeHtml(doc.file_name || 'document')}')">
-                                Télécharger
-                            </button>
-                            ${this.isAdmin() ? `<button class="btn btn-sm btn-danger" onclick="App.deleteDocument(${doc.id})">Supprimer</button>` : ''}
-                        </div>
-                    </div>
-                </div>`;
-            });
-            html += '</div>';
-        }
-
-        container.innerHTML = html;
-    },
-
-    filterDocuments(category) {
-        // Update active filter button
-        document.querySelectorAll('.filter-btn').forEach(btn => {
-            btn.classList.toggle('active', btn.textContent === (category || 'Tous'));
+        const categories = [];
+        const seen = {};
+        this.state.documents.forEach(d => {
+            if (d.category && !seen[d.category]) {
+                seen[d.category] = true;
+                categories.push(d.category);
+            }
         });
-        this.loadDocuments(category);
+
+        let filterHtml = '<div class="library-filters">';
+        filterHtml += '<button class="filter-btn ' + (!this.state.docCategory ? 'active' : '') + '" onclick="App.loadDocuments(\'\')">Tous</button>';
+        categories.forEach(cat => {
+            filterHtml += '<button class="filter-btn ' + (this.state.docCategory === cat ? 'active' : '') + '"'
+                + ' onclick="App.loadDocuments(\'' + this.escapeHtml(cat) + '\')">' + this.escapeHtml(cat) + '</button>';
+        });
+        filterHtml += '</div>';
+
+        let adminUpload = '';
+        if (this.isAdmin()) {
+            adminUpload = '<div class="library-upload">'
+                + '<button class="btn btn-primary" onclick="App.showDocumentUploadForm()">Ajouter un document</button>'
+                + '</div>';
+        }
+
+        let gridHtml = '<div class="library-grid">';
+        if (this.state.documents.length === 0) {
+            gridHtml += '<div class="empty-state">Aucun document disponible.</div>';
+        } else {
+            this.state.documents.forEach(doc => {
+                const icon = this.getFileIcon(doc.mime_type || doc.type || '');
+                const size = doc.size ? this.formatFileSize(doc.size) : '';
+                gridHtml += '<div class="doc-card">'
+                    + '<div class="doc-icon">' + icon + '</div>'
+                    + '<div class="doc-info">'
+                    + '<h4 class="doc-title">' + this.escapeHtml(doc.title || doc.name) + '</h4>'
+                    + (doc.description ? '<p class="doc-desc">' + this.escapeHtml(doc.description) + '</p>' : '')
+                    + '<div class="doc-meta">'
+                    + (doc.category ? '<span class="doc-category">' + this.escapeHtml(doc.category) + '</span>' : '')
+                    + '<span class="doc-size">' + size + '</span>'
+                    + '<span class="doc-date">' + this.formatDate(doc.created_at) + '</span>'
+                    + '</div>'
+                    + '</div>'
+                    + '<button class="btn btn-sm doc-download" onclick="App.downloadFile(\'' + this.escapeHtml(doc.url) + '\', \'' + this.escapeHtml(doc.name || doc.title) + '\')">Telecharger</button>'
+                    + '</div>';
+            });
+        }
+        gridHtml += '</div>';
+
+        view.innerHTML = '<div class="view-header"><h2>Bibliotheque</h2></div>'
+            + adminUpload
+            + filterHtml
+            + gridHtml;
     },
 
-    showUploadDocumentModal() {
-        let modal = document.getElementById('uploadDocModal');
-        if (!modal) {
-            modal = document.createElement('div');
-            modal.id = 'uploadDocModal';
-            modal.className = 'modal-overlay';
-            modal.innerHTML = `<div class="modal">
-                <div class="modal-header">
-                    <h3>Ajouter un document</h3>
-                    <button class="modal-close" onclick="App.hideModal('uploadDocModal')">✕</button>
-                </div>
-                <div class="modal-body">
-                    <form id="uploadDocForm" onsubmit="event.preventDefault();App.uploadDocument()">
-                        <div class="form-group">
-                            <label>Titre</label>
-                            <input type="text" name="title" required class="form-input" placeholder="Titre du document">
-                        </div>
-                        <div class="form-group">
-                            <label>Catégorie</label>
-                            <input type="text" name="category" class="form-input" placeholder="Ex: Protocoles, Articles...">
-                        </div>
-                        <div class="form-group">
-                            <label>Description</label>
-                            <textarea name="description" class="form-input" rows="3" placeholder="Description optionnelle"></textarea>
-                        </div>
-                        <div class="form-group">
-                            <label>Fichier</label>
-                            <input type="file" name="file" required class="form-input">
-                        </div>
-                        <button type="submit" class="btn btn-primary btn-block">Envoyer</button>
-                    </form>
-                </div>
-            </div>`;
-            document.body.appendChild(modal);
-        }
-        this.showModal('uploadDocModal');
+    showDocumentUploadForm() {
+        const modal = document.createElement('div');
+        modal.className = 'modal';
+        modal.id = 'docUploadModal';
+        modal.innerHTML = '<div class="modal-content">'
+            + '<div class="modal-header">'
+            + '<h3>Ajouter un document</h3>'
+            + '<button class="modal-close" onclick="App.hideModal(\'docUploadModal\')">&times;</button>'
+            + '</div>'
+            + '<div class="modal-body">'
+            + '<form id="docUploadForm" onsubmit="event.preventDefault(); App.uploadDocument();">'
+            + '<div class="form-group"><label>Titre</label><input type="text" name="title" required></div>'
+            + '<div class="form-group"><label>Description</label><textarea name="description" rows="3"></textarea></div>'
+            + '<div class="form-group"><label>Categorie</label><input type="text" name="category" placeholder="Ex: Protocoles, Formations..."></div>'
+            + '<div class="form-group"><label>Fichier</label><input type="file" name="file" required></div>'
+            + '<button type="submit" class="btn btn-primary">Envoyer</button>'
+            + '</form>'
+            + '</div>'
+            + '</div>';
+        modal.addEventListener('click', (e) => { if (e.target === modal) App.hideModal('docUploadModal'); });
+        document.body.appendChild(modal);
+        modal.style.display = 'flex';
     },
 
     async uploadDocument() {
-        const form = document.getElementById('uploadDocForm');
+        if (!this.isAdmin()) return;
+
+        const form = document.getElementById('docUploadForm');
         if (!form) return;
 
         const formData = new FormData(form);
-        formData.append('action', 'upload');
 
         try {
             const data = await this.api('documents.php?action=upload', {
                 method: 'POST',
-                body: formData,
+                body: formData
             });
-            if (data && data.success) {
-                this.showToast('Document ajouté', 'success');
-                this.hideModal('uploadDocModal');
-                form.reset();
+            if (data.success) {
+                this.showToast('Document ajoute avec succes.', 'success');
+                this.hideModal('docUploadModal');
+                const modal = document.getElementById('docUploadModal');
+                if (modal) modal.remove();
                 this.loadDocuments();
             }
-        } catch (err) {
-            this.showToast(err.message, 'error');
-        }
-    },
-
-    async deleteDocument(docId) {
-        if (!confirm('Supprimer ce document ?')) return;
-        try {
-            await this.api('documents.php?action=delete', {
-                method: 'POST',
-                body: { document_id: docId },
-            });
-            this.showToast('Document supprimé', 'success');
-            this.loadDocuments();
-        } catch (err) {
-            this.showToast(err.message, 'error');
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
     // =========================================================================
-    // AGENDA (Events)
+    // 14. AGENDA
     // =========================================================================
     async loadEvents() {
         try {
             const data = await this.api('events.php?action=list');
-            this.renderAgenda(data?.events || []);
-        } catch (err) {
-            this.showToast('Erreur de chargement des événements', 'error');
+            this.state.events = data.events || [];
+            this.renderAgenda();
+        } catch (e) {
+            this.showToast('Erreur lors du chargement des evenements.', 'error');
         }
     },
 
-    renderAgenda(events) {
-        const container = document.getElementById('agendaContent');
-        if (!container) return;
+    renderAgenda() {
+        const view = document.getElementById('agendaView');
+        if (!view) return;
 
-        let html = '<div class="agenda-header">';
-        html += '<h2>Agenda</h2>';
+        let adminBtn = '';
         if (this.isAdmin()) {
-            html += `<button class="btn btn-primary" onclick="App.showCreateEventModal()">
-                <span>+</span> Ajouter un événement
-            </button>`;
+            adminBtn = '<button class="btn btn-primary" onclick="App.showCreateEventForm()">Nouvel evenement</button>';
         }
-        html += '</div>';
 
-        if (events.length === 0) {
-            html += '<div class="empty-state"><p>Aucun événement programmé</p></div>';
+        let eventsHtml = '';
+        if (this.state.events.length === 0) {
+            eventsHtml = '<div class="empty-state">Aucun evenement a venir.</div>';
         } else {
-            // Group events: upcoming vs past
-            const now = new Date();
-            const upcoming = events.filter(e => new Date(e.event_date) >= now);
-            const past = events.filter(e => new Date(e.event_date) < now);
+            const monthNames = ['Jan', 'Fev', 'Mar', 'Avr', 'Mai', 'Jun', 'Jul', 'Aou', 'Sep', 'Oct', 'Nov', 'Dec'];
+            this.state.events.forEach(event => {
+                const startDate = new Date(event.start_date || event.date);
+                const day = startDate.getDate();
+                const month = monthNames[startDate.getMonth()];
+                const year = startDate.getFullYear();
 
-            if (upcoming.length > 0) {
-                html += '<h3 class="agenda-section-title">À venir</h3>';
-                html += '<div class="agenda-list">';
-                upcoming.forEach(evt => {
-                    html += this.renderEventCard(evt);
-                });
-                html += '</div>';
-            }
+                const timeStr = event.start_time
+                    ? event.start_time + (event.end_time ? ' - ' + event.end_time : '')
+                    : '';
+                const locationStr = event.location ? this.escapeHtml(event.location) : '';
+                const regLink = event.registration_url
+                    ? '<a href="' + this.escapeHtml(event.registration_url) + '" target="_blank" class="btn btn-sm btn-outline">S\'inscrire</a>'
+                    : '';
 
-            if (past.length > 0) {
-                html += '<h3 class="agenda-section-title">Passés</h3>';
-                html += '<div class="agenda-list past">';
-                past.forEach(evt => {
-                    html += this.renderEventCard(evt, true);
-                });
-                html += '</div>';
-            }
+                eventsHtml += '<div class="event-card">'
+                    + '<div class="event-date-badge">'
+                    + '<span class="event-day">' + day + '</span>'
+                    + '<span class="event-month">' + month + '</span>'
+                    + '<span class="event-year">' + year + '</span>'
+                    + '</div>'
+                    + '<div class="event-info">'
+                    + '<h4 class="event-title">' + this.escapeHtml(event.title) + '</h4>'
+                    + (event.description ? '<p class="event-desc">' + this.escapeHtml(event.description) + '</p>' : '')
+                    + '<div class="event-meta">'
+                    + (locationStr ? '<span>' + locationStr + '</span>' : '')
+                    + (timeStr ? '<span>' + timeStr + '</span>' : '')
+                    + '</div>'
+                    + regLink
+                    + '</div>'
+                    + '</div>';
+            });
         }
 
-        container.innerHTML = html;
+        view.innerHTML = '<div class="view-header"><h2>Agenda</h2>' + adminBtn + '</div>'
+            + '<div class="events-list">' + eventsHtml + '</div>';
     },
 
-    renderEventCard(evt, isPast = false) {
-        const d = new Date(evt.event_date);
-        const months = [
-            'Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Jun',
-            'Jul', 'Aoû', 'Sep', 'Oct', 'Nov', 'Déc',
-        ];
-        const days = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'];
-
-        return `<div class="event-card ${isPast ? 'past' : ''}">
-            <div class="event-date-badge">
-                <span class="event-day-name">${days[d.getDay()]}</span>
-                <span class="event-day">${d.getDate()}</span>
-                <span class="event-month">${months[d.getMonth()]}</span>
-                <span class="event-year">${d.getFullYear()}</span>
-            </div>
-            <div class="event-info">
-                <div class="event-title">${this.escapeHtml(evt.title)}</div>
-                ${evt.location ? `<div class="event-detail">📍 ${this.escapeHtml(evt.location)}</div>` : ''}
-                ${evt.start_time ? `<div class="event-detail">🕐 ${this.escapeHtml(evt.start_time)}${evt.end_time ? ' - ' + this.escapeHtml(evt.end_time) : ''}</div>` : ''}
-                ${evt.description ? `<div class="event-description">${this.escapeHtml(evt.description)}</div>` : ''}
-                <div class="event-actions">
-                    ${evt.registration_link && !isPast ? `<a href="${this.escapeHtml(evt.registration_link)}" target="_blank" rel="noopener" class="btn btn-sm btn-accent">S'inscrire</a>` : ''}
-                    ${this.isAdmin() ? `<button class="btn btn-sm btn-danger" onclick="App.deleteEvent(${evt.id})">Supprimer</button>` : ''}
-                </div>
-            </div>
-        </div>`;
-    },
-
-    showCreateEventModal() {
-        let modal = document.getElementById('createEventModal');
-        if (!modal) {
-            modal = document.createElement('div');
-            modal.id = 'createEventModal';
-            modal.className = 'modal-overlay';
-            modal.innerHTML = `<div class="modal">
-                <div class="modal-header">
-                    <h3>Ajouter un événement</h3>
-                    <button class="modal-close" onclick="App.hideModal('createEventModal')">✕</button>
-                </div>
-                <div class="modal-body">
-                    <form id="createEventForm" onsubmit="event.preventDefault();App.createEvent()">
-                        <div class="form-group">
-                            <label>Titre *</label>
-                            <input type="text" name="title" required class="form-input">
-                        </div>
-                        <div class="form-group">
-                            <label>Date *</label>
-                            <input type="date" name="event_date" required class="form-input">
-                        </div>
-                        <div class="form-group form-row">
-                            <div>
-                                <label>Heure début</label>
-                                <input type="time" name="start_time" class="form-input">
-                            </div>
-                            <div>
-                                <label>Heure fin</label>
-                                <input type="time" name="end_time" class="form-input">
-                            </div>
-                        </div>
-                        <div class="form-group">
-                            <label>Lieu</label>
-                            <input type="text" name="location" class="form-input">
-                        </div>
-                        <div class="form-group">
-                            <label>Description</label>
-                            <textarea name="description" class="form-input" rows="3"></textarea>
-                        </div>
-                        <div class="form-group">
-                            <label>Lien d'inscription</label>
-                            <input type="url" name="registration_link" class="form-input" placeholder="https://...">
-                        </div>
-                        <button type="submit" class="btn btn-primary btn-block">Créer</button>
-                    </form>
-                </div>
-            </div>`;
-            document.body.appendChild(modal);
-        }
-        this.showModal('createEventModal');
+    showCreateEventForm() {
+        const modal = document.createElement('div');
+        modal.className = 'modal';
+        modal.id = 'createEventModal';
+        modal.innerHTML = '<div class="modal-content">'
+            + '<div class="modal-header">'
+            + '<h3>Nouvel evenement</h3>'
+            + '<button class="modal-close" onclick="App.hideModal(\'createEventModal\')">&times;</button>'
+            + '</div>'
+            + '<div class="modal-body">'
+            + '<form id="createEventForm" onsubmit="event.preventDefault(); App.createEvent();">'
+            + '<div class="form-group"><label>Titre *</label><input type="text" name="title" required></div>'
+            + '<div class="form-group"><label>Description</label><textarea name="description" rows="3"></textarea></div>'
+            + '<div class="form-group"><label>Date de debut *</label><input type="date" name="start_date" required></div>'
+            + '<div class="form-group"><label>Heure de debut</label><input type="time" name="start_time"></div>'
+            + '<div class="form-group"><label>Heure de fin</label><input type="time" name="end_time"></div>'
+            + '<div class="form-group"><label>Lieu</label><input type="text" name="location"></div>'
+            + '<div class="form-group"><label>Lien d\'inscription</label><input type="url" name="registration_url" placeholder="https://..."></div>'
+            + '<button type="submit" class="btn btn-primary">Creer</button>'
+            + '</form>'
+            + '</div>'
+            + '</div>';
+        modal.addEventListener('click', (e) => { if (e.target === modal) App.hideModal('createEventModal'); });
+        document.body.appendChild(modal);
+        modal.style.display = 'flex';
     },
 
     async createEvent() {
+        if (!this.isAdmin()) return;
+
         const form = document.getElementById('createEventForm');
         if (!form) return;
 
         const formData = new FormData(form);
         const body = {};
-        for (const [key, value] of formData.entries()) {
-            if (value) body[key] = value;
+        formData.forEach((value, key) => { body[key] = value; });
+
+        if (!body.title || !body.start_date) {
+            this.showToast('Veuillez remplir les champs obligatoires.', 'error');
+            return;
         }
 
         try {
             const data = await this.api('events.php?action=create', {
                 method: 'POST',
-                body: body,
+                body: body
             });
-            if (data && data.success) {
-                this.showToast('Événement créé', 'success');
+            if (data.success) {
+                this.showToast('Evenement cree avec succes.', 'success');
                 this.hideModal('createEventModal');
-                form.reset();
+                const modal = document.getElementById('createEventModal');
+                if (modal) modal.remove();
                 this.loadEvents();
             }
-        } catch (err) {
-            this.showToast(err.message, 'error');
-        }
-    },
-
-    async deleteEvent(eventId) {
-        if (!confirm('Supprimer cet événement ?')) return;
-        try {
-            await this.api('events.php?action=delete', {
-                method: 'POST',
-                body: { event_id: eventId },
-            });
-            this.showToast('Événement supprimé', 'success');
-            this.loadEvents();
-        } catch (err) {
-            this.showToast(err.message, 'error');
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
     // =========================================================================
-    // DIRECTORY (Members)
+    // 15. DIRECTORY
     // =========================================================================
-    async loadMembers(searchQuery = '', page = 1) {
+    async loadMembers(search, page) {
+        if (search !== undefined) this.state.memberSearch = search;
+        if (page !== undefined) this.state.memberPage = page;
+
         try {
-            let url = `members.php?action=list&page=${page}&per_page=30`;
-            if (searchQuery) url += `&search=${encodeURIComponent(searchQuery)}`;
-            const data = await this.api(url);
-            this.renderDirectory(data?.members || [], data?.total || 0, page, searchQuery);
-        } catch (err) {
-            this.showToast('Erreur de chargement de l\'annuaire', 'error');
-        }
-    },
-
-    renderDirectory(members, total, page, searchQuery) {
-        const container = document.getElementById('directoryContent');
-        if (!container) return;
-
-        let html = '<div class="directory-header">';
-        html += '<h2>Annuaire des membres</h2>';
-        html += `<div class="directory-search">
-            <input type="text" class="form-input" placeholder="Rechercher un membre..."
-                value="${this.escapeHtml(searchQuery || '')}"
-                oninput="App.debounce(() => App.loadMembers(this.value), 400)()">
-        </div>`;
-        html += `<div class="directory-count">${total} membre${total > 1 ? 's' : ''}</div>`;
-        html += '</div>';
-
-        if (members.length === 0) {
-            html += '<div class="empty-state"><p>Aucun membre trouvé</p></div>';
-        } else {
-            html += '<div class="directory-grid">';
-            members.forEach(m => {
-                const initials = (
-                    (m.first_name?.[0] || '') + (m.last_name?.[0] || '')
-                ).toUpperCase();
-
-                const avatar = m.profile_photo
-                    ? `<img src="/connect/${this.escapeHtml(m.profile_photo)}" class="member-avatar" alt="${this.escapeHtml(m.first_name)}" loading="lazy">`
-                    : `<div class="member-avatar member-avatar-initials">${initials}</div>`;
-
-                const roleBadge = m.role === 'admin' || m.role === 'super_admin'
-                    ? '<span class="role-badge admin">Admin</span>'
-                    : '';
-
-                html += `<div class="member-card">
-                    ${avatar}
-                    <div class="member-name">${this.escapeHtml((m.first_name || '') + ' ' + (m.last_name || ''))} ${roleBadge}</div>
-                    ${m.specialty ? `<div class="member-specialty">${this.escapeHtml(m.specialty)}</div>` : ''}
-                    ${m.city ? `<div class="member-city">📍 ${this.escapeHtml(m.city)}</div>` : ''}
-                    ${m.institution ? `<div class="member-institution">🏥 ${this.escapeHtml(m.institution)}</div>` : ''}
-                    ${m.email ? `<div class="member-email"><a href="mailto:${this.escapeHtml(m.email)}">${this.escapeHtml(m.email)}</a></div>` : ''}
-                </div>`;
-            });
-            html += '</div>';
-
-            // Pagination
-            const totalPages = Math.ceil(total / 30);
-            if (totalPages > 1) {
-                html += '<div class="pagination">';
-                for (let i = 1; i <= totalPages; i++) {
-                    html += `<button class="page-btn ${i === page ? 'active' : ''}" onclick="App.loadMembers('${this.escapeHtml(searchQuery || '')}', ${i})">${i}</button>`;
-                }
-                html += '</div>';
+            let endpoint = 'members.php?action=list&page=' + this.state.memberPage + '&limit=20';
+            if (this.state.memberSearch) {
+                endpoint += '&search=' + encodeURIComponent(this.state.memberSearch);
             }
+            const data = await this.api(endpoint);
+            this.state.members = data.members || [];
+            this.renderDirectory(data.total || 0, data.pages || 1);
+        } catch (e) {
+            this.showToast('Erreur lors du chargement de l\'annuaire.', 'error');
+        }
+    },
+
+    renderDirectory(total, totalPages) {
+        const view = document.getElementById('directoryView');
+        if (!view) return;
+
+        let searchHtml = '<div class="directory-search">'
+            + '<input type="text" placeholder="Rechercher un membre..." value="' + this.escapeHtml(this.state.memberSearch) + '"'
+            + ' oninput="clearTimeout(App._dirSearchTimer); App._dirSearchTimer = setTimeout(() => App.loadMembers(this.value, 1), 400);">'
+            + '</div>';
+
+        let membersHtml = '<div class="directory-grid">';
+        if (this.state.members.length === 0) {
+            membersHtml += '<div class="empty-state">Aucun membre trouve.</div>';
+        } else {
+            this.state.members.forEach(member => {
+                const initials = ((member.first_name || '')[0] || '') + ((member.last_name || '')[0] || '');
+                const avatar = member.avatar
+                    ? '<img src="' + this.escapeHtml(member.avatar) + '" alt="' + this.escapeHtml(initials) + '" class="member-avatar-img">'
+                    : '<div class="member-avatar-initials">' + this.escapeHtml(initials.toUpperCase()) + '</div>';
+
+                const roleLabel = member.role === 'admin' ? 'Administrateur' : (member.role === 'moderator' ? 'Moderateur' : 'Membre');
+
+                membersHtml += '<div class="member-card">'
+                    + '<div class="member-avatar">' + avatar + '</div>'
+                    + '<div class="member-info">'
+                    + '<h4 class="member-name">' + this.escapeHtml(member.first_name + ' ' + member.last_name) + '</h4>'
+                    + '<span class="member-role">' + roleLabel + '</span>'
+                    + (member.specialty ? '<span class="member-specialty">' + this.escapeHtml(member.specialty) + '</span>' : '')
+                    + (member.city ? '<span class="member-city">' + this.escapeHtml(member.city) + '</span>' : '')
+                    + (member.institution ? '<span class="member-institution">' + this.escapeHtml(member.institution) + '</span>' : '')
+                    + '</div>'
+                    + '</div>';
+            });
+        }
+        membersHtml += '</div>';
+
+        let paginationHtml = '';
+        if (totalPages > 1) {
+            paginationHtml = '<div class="pagination">';
+            for (let i = 1; i <= totalPages; i++) {
+                paginationHtml += '<button class="page-btn ' + (i === this.state.memberPage ? 'active' : '') + '"'
+                    + ' onclick="App.loadMembers(undefined, ' + i + ')">' + i + '</button>';
+            }
+            paginationHtml += '</div>';
         }
 
-        container.innerHTML = html;
+        view.innerHTML = '<div class="view-header"><h2>Annuaire</h2><span class="member-count">' + (total || 0) + ' membres</span></div>'
+            + searchHtml
+            + membersHtml
+            + paginationHtml;
     },
 
     // =========================================================================
-    // PROFILE
+    // 16. PROFILE
     // =========================================================================
     renderProfile() {
-        const container = document.getElementById('profileContent');
-        if (!container || !this.state.user) return;
+        const view = document.getElementById('profileView');
+        if (!view || !this.state.user) return;
 
-        const u = this.state.user;
-        const initials = (
-            (u.first_name?.[0] || '') + (u.last_name?.[0] || '')
-        ).toUpperCase();
+        const user = this.state.user;
+        const initials = ((user.first_name || '')[0] || '') + ((user.last_name || '')[0] || '');
+        const avatar = user.avatar
+            ? '<img src="' + this.escapeHtml(user.avatar) + '" alt="" class="profile-avatar-img">'
+            : '<div class="profile-avatar-initials">' + this.escapeHtml(initials.toUpperCase()) + '</div>';
 
-        container.innerHTML = `
-            <div class="profile-page">
-                <div class="profile-card">
-                    <div class="profile-avatar-wrapper">
-                        ${u.profile_photo
-                            ? `<img src="/connect/${this.escapeHtml(u.profile_photo)}" class="profile-avatar" alt="Photo de profil">`
-                            : `<div class="profile-avatar profile-avatar-initials">${initials}</div>`}
-                    </div>
-                    <h2 class="profile-name">${this.escapeHtml((u.first_name || '') + ' ' + (u.last_name || ''))}</h2>
-                    ${u.specialty ? `<div class="profile-specialty">${this.escapeHtml(u.specialty)}</div>` : ''}
+        const infoItems = [
+            { label: 'Email', value: user.email },
+            { label: 'Telephone', value: user.phone },
+            { label: 'Ville', value: user.city },
+            { label: 'Institution', value: user.institution },
+            { label: 'Specialite', value: user.specialty },
+            { label: 'RPPS', value: user.rpps },
+            { label: 'Membre depuis', value: this.formatDate(user.created_at) }
+        ].filter(item => item.value);
 
-                    <div class="profile-info-list">
-                        <div class="profile-info-item">
-                            <span class="profile-info-label">Email</span>
-                            <span class="profile-info-value">${this.escapeHtml(u.email)}</span>
-                        </div>
-                        <div class="profile-info-item">
-                            <span class="profile-info-label">Téléphone</span>
-                            <span class="profile-info-value">${this.escapeHtml(u.phone || '-')}</span>
-                        </div>
-                        <div class="profile-info-item">
-                            <span class="profile-info-label">Ville</span>
-                            <span class="profile-info-value">${this.escapeHtml(u.city || '-')}</span>
-                        </div>
-                        <div class="profile-info-item">
-                            <span class="profile-info-label">Établissement</span>
-                            <span class="profile-info-value">${this.escapeHtml(u.institution || '-')}</span>
-                        </div>
-                        <div class="profile-info-item">
-                            <span class="profile-info-label">Statut</span>
-                            <span class="profile-info-value">${this.escapeHtml(this.getRoleLabel(u.role))}</span>
-                        </div>
-                        <div class="profile-info-item">
-                            <span class="profile-info-label">Membre depuis</span>
-                            <span class="profile-info-value">${u.created_at ? this.formatDate(new Date(u.created_at)) : '-'}</span>
-                        </div>
-                    </div>
+        let infoListHtml = '';
+        infoItems.forEach(item => {
+            infoListHtml += '<div class="profile-info-item">'
+                + '<span class="info-label">' + item.label + '</span>'
+                + '<span class="info-value">' + this.escapeHtml(item.value) + '</span>'
+                + '</div>';
+        });
 
-                    <div class="profile-actions">
-                        <button class="btn btn-primary" onclick="App.showProfileEditModal()">Modifier le profil</button>
-                        <button class="btn btn-outline" onclick="App.showChangePasswordModal()">Changer le mot de passe</button>
-                        <button class="btn btn-danger" onclick="App.logout()">Déconnexion</button>
-                    </div>
-                </div>
-            </div>`;
-    },
-
-    getRoleLabel(role) {
-        const labels = {
-            super_admin: 'Super Administrateur',
-            admin: 'Administrateur',
-            member: 'Membre',
-            pending: 'En attente de validation',
-            blocked: 'Bloqué',
-        };
-        return labels[role] || role || '';
-    },
-
-    showProfileEditModal() {
-        const u = this.state.user;
-        if (!u) return;
-
-        let modal = document.getElementById('profileEditModal');
-        if (!modal) {
-            modal = document.createElement('div');
-            modal.id = 'profileEditModal';
-            modal.className = 'modal-overlay';
-            document.body.appendChild(modal);
-        }
-
-        modal.innerHTML = `<div class="modal">
-            <div class="modal-header">
-                <h3>Modifier le profil</h3>
-                <button class="modal-close" onclick="App.hideModal('profileEditModal')">✕</button>
-            </div>
-            <div class="modal-body">
-                <form id="profileEditForm" onsubmit="event.preventDefault();App.saveProfileEdit()">
-                    <div class="form-group">
-                        <label>Prénom *</label>
-                        <input type="text" name="first_name" class="form-input" value="${this.escapeHtml(u.first_name || '')}" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Nom *</label>
-                        <input type="text" name="last_name" class="form-input" value="${this.escapeHtml(u.last_name || '')}" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Téléphone</label>
-                        <input type="tel" name="phone" class="form-input" value="${this.escapeHtml(u.phone || '')}">
-                    </div>
-                    <div class="form-group">
-                        <label>Ville</label>
-                        <input type="text" name="city" class="form-input" value="${this.escapeHtml(u.city || '')}">
-                    </div>
-                    <div class="form-group">
-                        <label>Établissement</label>
-                        <input type="text" name="institution" class="form-input" value="${this.escapeHtml(u.institution || '')}">
-                    </div>
-                    <div class="form-group">
-                        <label>Spécialité</label>
-                        <input type="text" name="specialty" class="form-input" value="${this.escapeHtml(u.specialty || '')}">
-                    </div>
-                    <div class="form-group">
-                        <label>Photo de profil</label>
-                        <input type="file" name="profile_photo" class="form-input" accept="image/*">
-                    </div>
-                    <button type="submit" class="btn btn-primary btn-block">Enregistrer</button>
-                </form>
-            </div>
-        </div>`;
-
-        this.showModal('profileEditModal');
-    },
-
-    async saveProfileEdit() {
-        const form = document.getElementById('profileEditForm');
-        if (!form) return;
-
-        const formData = new FormData(form);
-        formData.append('action', 'update');
-
-        try {
-            const data = await this.api('members.php?action=update', {
-                method: 'POST',
-                body: formData,
-            });
-            if (data && data.user) {
-                this.state.user = { ...this.state.user, ...data.user };
-                this.renderProfile();
-                this.updateUserUI();
-                this.showToast('Profil mis à jour', 'success');
-                this.hideModal('profileEditModal');
-            }
-        } catch (err) {
-            this.showToast(err.message, 'error');
-        }
+        view.innerHTML = '<div class="profile-container">'
+            + '<div class="profile-header">'
+            + '<div class="profile-avatar">' + avatar + '</div>'
+            + '<h2>' + this.escapeHtml(user.first_name + ' ' + user.last_name) + '</h2>'
+            + '<span class="profile-role">' + (user.role === 'admin' ? 'Administrateur' : (user.role === 'moderator' ? 'Moderateur' : 'Membre')) + '</span>'
+            + '</div>'
+            + '<div class="profile-info-list">' + infoListHtml + '</div>'
+            + '<div class="profile-actions">'
+            + '<button class="btn btn-primary" onclick="App.showProfileEditModal()">Modifier le profil</button>'
+            + '<button class="btn btn-outline" onclick="App.logout()">Deconnexion</button>'
+            + '</div>'
+            + '</div>';
     },
 
     async updateProfile(formData) {
         try {
-            const data = await this.api('members.php?action=update', {
+            const data = await this.api('auth.php?action=update_profile', {
                 method: 'POST',
-                body: formData,
+                body: formData
             });
-            if (data && data.user) {
-                this.state.user = { ...this.state.user, ...data.user };
+            if (data.success) {
+                if (data.user) {
+                    this.state.user = data.user;
+                }
+                this.showToast('Profil mis a jour avec succes.', 'success');
+                this.hideModal('profileModal');
                 this.renderProfile();
                 this.updateUserUI();
-                this.showToast('Profil mis à jour', 'success');
-                this.hideModal('profileModal');
             }
-        } catch (err) {
-            this.showToast(err.message, 'error');
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
-    showChangePasswordModal() {
-        let modal = document.getElementById('changePasswordModal');
-        if (!modal) {
-            modal = document.createElement('div');
-            modal.id = 'changePasswordModal';
-            modal.className = 'modal-overlay';
-            modal.innerHTML = `<div class="modal">
-                <div class="modal-header">
-                    <h3>Changer le mot de passe</h3>
-                    <button class="modal-close" onclick="App.hideModal('changePasswordModal')">✕</button>
-                </div>
-                <div class="modal-body">
-                    <form id="changePasswordForm" onsubmit="event.preventDefault();App.handleChangePassword()">
-                        <div class="form-group">
-                            <label>Mot de passe actuel</label>
-                            <input type="password" name="current_password" class="form-input" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Nouveau mot de passe</label>
-                            <input type="password" name="new_password" class="form-input" required minlength="8">
-                        </div>
-                        <div class="form-group">
-                            <label>Confirmer le nouveau mot de passe</label>
-                            <input type="password" name="confirm_password" class="form-input" required>
-                        </div>
-                        <div id="changePasswordError" class="form-error"></div>
-                        <button type="submit" class="btn btn-primary btn-block">Modifier</button>
-                    </form>
-                </div>
-            </div>`;
-            document.body.appendChild(modal);
-        }
-        document.getElementById('changePasswordForm')?.reset();
-        document.getElementById('changePasswordError').textContent = '';
-        this.showModal('changePasswordModal');
+    showProfileEditModal() {
+        const user = this.state.user;
+        if (!user) return;
+
+        const modal = document.getElementById('profileModal');
+        if (!modal) return;
+
+        const content = modal.querySelector('.modal-content') || modal;
+        content.innerHTML = '<div class="modal-header">'
+            + '<h3>Modifier le profil</h3>'
+            + '<button class="modal-close" onclick="App.hideModal(\'profileModal\')">&times;</button>'
+            + '</div>'
+            + '<div class="modal-body">'
+            + '<form id="profileEditForm" onsubmit="event.preventDefault(); App.submitProfileEdit();">'
+            + '<div class="form-group"><label>Prenom</label><input type="text" name="first_name" value="' + this.escapeHtml(user.first_name || '') + '" required></div>'
+            + '<div class="form-group"><label>Nom</label><input type="text" name="last_name" value="' + this.escapeHtml(user.last_name || '') + '" required></div>'
+            + '<div class="form-group"><label>Telephone</label><input type="tel" name="phone" value="' + this.escapeHtml(user.phone || '') + '"></div>'
+            + '<div class="form-group"><label>Ville</label><input type="text" name="city" value="' + this.escapeHtml(user.city || '') + '"></div>'
+            + '<div class="form-group"><label>Institution</label><input type="text" name="institution" value="' + this.escapeHtml(user.institution || '') + '"></div>'
+            + '<div class="form-group"><label>Specialite</label><input type="text" name="specialty" value="' + this.escapeHtml(user.specialty || '') + '"></div>'
+            + '<div class="form-group"><label>Photo de profil</label><input type="file" name="avatar" accept="image/*"></div>'
+            + '<button type="submit" class="btn btn-primary">Enregistrer</button>'
+            + '</form>'
+            + '</div>';
+
+        this.showModal('profileModal');
     },
 
-    async handleChangePassword() {
-        const form = document.getElementById('changePasswordForm');
-        const errorEl = document.getElementById('changePasswordError');
+    submitProfileEdit() {
+        const form = document.getElementById('profileEditForm');
         if (!form) return;
-
-        const currentPassword = form.querySelector('[name="current_password"]').value;
-        const newPassword = form.querySelector('[name="new_password"]').value;
-        const confirmPassword = form.querySelector('[name="confirm_password"]').value;
-
-        if (newPassword !== confirmPassword) {
-            if (errorEl) errorEl.textContent = 'Les mots de passe ne correspondent pas';
-            return;
-        }
-
-        if (newPassword.length < 8) {
-            if (errorEl) errorEl.textContent = 'Le mot de passe doit contenir au moins 8 caractères';
-            return;
-        }
-
-        try {
-            await this.changePassword(currentPassword, newPassword);
-            this.hideModal('changePasswordModal');
-        } catch (err) {
-            if (errorEl) errorEl.textContent = err.message;
-        }
+        const formData = new FormData(form);
+        this.updateProfile(formData);
     },
 
     // =========================================================================
-    // ADMIN
+    // 17. ADMIN
     // =========================================================================
     isAdmin() {
-        return (
-            this.state.user &&
-            ['super_admin', 'admin'].includes(this.state.user.role)
-        );
+        return this.state.user && (this.state.user.role === 'admin' || this.state.user.role === 'superadmin');
     },
 
     async loadAdminDashboard() {
-        if (!this.isAdmin()) {
-            this.showView('chatView');
-            return;
-        }
-
-        const container = document.getElementById('adminContent');
-        if (container) {
-            container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
-        }
+        if (!this.isAdmin()) return;
 
         try {
-            const [stats, pending, reports] = await Promise.all([
+            const results = await Promise.all([
                 this.api('admin.php?action=stats'),
-                this.api('admin.php?action=pending'),
-                this.api('admin.php?action=reports'),
+                this.api('admin.php?action=pending_members'),
+                this.api('admin.php?action=reports')
             ]);
-            this.renderAdminDashboard(stats, pending, reports);
-        } catch (err) {
-            this.showToast(err.message, 'error');
-            if (container) {
-                container.innerHTML =
-                    '<div class="empty-state"><p>Erreur de chargement du tableau de bord</p></div>';
+
+            this.state.adminStats = results[0].stats || {};
+            this.state.pendingMembers = results[1].members || [];
+            this.state.reports = results[2].reports || [];
+
+            this.renderAdminDashboard();
+        } catch (e) {
+            this.showToast('Erreur lors du chargement du tableau de bord.', 'error');
+        }
+    },
+
+    renderAdminDashboard() {
+        const view = document.getElementById('adminView');
+        if (!view) return;
+
+        const stats = this.state.adminStats;
+
+        let statCards = '<div class="admin-stats">';
+        const statItems = [
+            { value: stats.total_members || 0, label: 'Membres' },
+            { value: stats.active_members || 0, label: 'Actifs' },
+            { value: stats.pending_members || 0, label: 'En attente' },
+            { value: stats.total_messages || 0, label: 'Messages' },
+            { value: stats.total_groups || 0, label: 'Groupes' },
+            { value: stats.reports_count || 0, label: 'Signalements' }
+        ];
+        statItems.forEach(s => {
+            statCards += '<div class="stat-card">'
+                + '<div class="stat-value">' + s.value + '</div>'
+                + '<div class="stat-label">' + s.label + '</div>'
+                + '</div>';
+        });
+        statCards += '</div>';
+
+        let pendingHtml = '<div class="admin-section"><h3>Membres en attente de validation</h3>';
+        if (this.state.pendingMembers.length === 0) {
+            pendingHtml += '<p class="empty-state">Aucune demande en attente.</p>';
+        } else {
+            pendingHtml += '<table class="admin-table"><thead><tr>'
+                + '<th>Nom</th><th>Email</th><th>RPPS</th><th>Ville</th><th>Date</th><th>Actions</th>'
+                + '</tr></thead><tbody>';
+            this.state.pendingMembers.forEach(member => {
+                pendingHtml += '<tr>'
+                    + '<td>' + this.escapeHtml(member.first_name + ' ' + member.last_name) + '</td>'
+                    + '<td>' + this.escapeHtml(member.email) + '</td>'
+                    + '<td>' + this.escapeHtml(member.rpps || '-') + '</td>'
+                    + '<td>' + this.escapeHtml(member.city || '-') + '</td>'
+                    + '<td>' + this.formatDate(member.created_at) + '</td>'
+                    + '<td class="action-btns">'
+                    + '<button class="btn btn-sm btn-success" onclick="App.approveMember(' + member.id + ')">Approuver</button>'
+                    + '<button class="btn btn-sm btn-danger" onclick="App.rejectMember(' + member.id + ')">Refuser</button>'
+                    + '</td>'
+                    + '</tr>';
+            });
+            pendingHtml += '</tbody></table>';
+        }
+        pendingHtml += '</div>';
+
+        let reportsHtml = '<div class="admin-section"><h3>Signalements</h3>';
+        if (this.state.reports.length === 0) {
+            reportsHtml += '<p class="empty-state">Aucun signalement.</p>';
+        } else {
+            reportsHtml += '<table class="admin-table"><thead><tr>'
+                + '<th>Signale par</th><th>Message</th><th>Raison</th><th>Date</th><th>Actions</th>'
+                + '</tr></thead><tbody>';
+            this.state.reports.forEach(report => {
+                const msgPreview = (report.message_content || '').substring(0, 60);
+                reportsHtml += '<tr>'
+                    + '<td>' + this.escapeHtml(report.reporter_name || 'Inconnu') + '</td>'
+                    + '<td>' + this.escapeHtml(msgPreview) + '</td>'
+                    + '<td>' + this.escapeHtml(report.reason || '-') + '</td>'
+                    + '<td>' + this.formatDate(report.created_at) + '</td>'
+                    + '<td class="action-btns">'
+                    + '<button class="btn btn-sm btn-outline" onclick="App.handleReport(' + report.id + ', \'dismiss\')">Ignorer</button>'
+                    + '<button class="btn btn-sm btn-danger" onclick="App.handleReport(' + report.id + ', \'delete\')">Supprimer le message</button>'
+                    + '</td>'
+                    + '</tr>';
+            });
+            reportsHtml += '</tbody></table>';
+        }
+        reportsHtml += '</div>';
+
+        view.innerHTML = '<div class="view-header"><h2>Administration</h2></div>'
+            + statCards
+            + pendingHtml
+            + reportsHtml;
+    },
+
+    async approveMember(memberId) {
+        try {
+            const data = await this.api('admin.php?action=approve_member', {
+                method: 'POST',
+                body: { member_id: memberId }
+            });
+            if (data.success) {
+                this.showToast('Membre approuve.', 'success');
+                this.state.pendingMembers = this.state.pendingMembers.filter(m => m.id !== memberId);
+                this.renderAdminDashboard();
             }
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
-    renderAdminDashboard(stats, pending, reports) {
-        const container = document.getElementById('adminContent');
-        if (!container) return;
-
-        const s = stats || {};
-        const pendingMembers = pending?.members || [];
-        const reportsList = reports?.reports || [];
-
-        let html = `<div class="admin-container">
-            <h2>Tableau de bord administrateur</h2>
-
-            <div class="admin-stats">
-                <div class="stat-card">
-                    <div class="stat-icon">👥</div>
-                    <div class="stat-value">${s.total_members || 0}</div>
-                    <div class="stat-label">Membres actifs</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">⏳</div>
-                    <div class="stat-value">${s.pending_members || 0}</div>
-                    <div class="stat-label">En attente</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">💬</div>
-                    <div class="stat-value">${s.total_messages || 0}</div>
-                    <div class="stat-label">Messages</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">📁</div>
-                    <div class="stat-value">${s.total_groups || 0}</div>
-                    <div class="stat-label">Salons</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">📄</div>
-                    <div class="stat-value">${s.total_documents || 0}</div>
-                    <div class="stat-label">Documents</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">⚠️</div>
-                    <div class="stat-value">${s.open_reports || 0}</div>
-                    <div class="stat-label">Signalements</div>
-                </div>
-            </div>
-
-            <div class="admin-section">
-                <h3>Demandes d'inscription (${pendingMembers.length})</h3>
-                ${pendingMembers.length === 0
-                    ? '<p class="text-muted">Aucune demande en attente</p>'
-                    : `<div class="admin-table-wrapper"><table class="admin-table">
-                    <thead>
-                        <tr>
-                            <th>Nom</th>
-                            <th>Email</th>
-                            <th>Ville</th>
-                            <th>Établissement</th>
-                            <th>Date</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${pendingMembers.map(m => `<tr>
-                            <td>${this.escapeHtml((m.first_name || '') + ' ' + (m.last_name || ''))}</td>
-                            <td>${this.escapeHtml(m.email || '')}</td>
-                            <td>${this.escapeHtml(m.city || '-')}</td>
-                            <td>${this.escapeHtml(m.institution || '-')}</td>
-                            <td>${m.created_at ? this.formatDate(new Date(m.created_at)) : '-'}</td>
-                            <td class="action-cell">
-                                <button class="btn btn-sm btn-primary" onclick="App.approveMember(${m.id})">Accepter</button>
-                                <button class="btn btn-sm btn-danger" onclick="App.rejectMember(${m.id})">Refuser</button>
-                            </td>
-                        </tr>`).join('')}
-                    </tbody>
-                </table></div>`}
-            </div>
-
-            <div class="admin-section">
-                <h3>Signalements (${reportsList.length})</h3>
-                ${reportsList.length === 0
-                    ? '<p class="text-muted">Aucun signalement</p>'
-                    : `<div class="admin-table-wrapper"><table class="admin-table">
-                    <thead>
-                        <tr>
-                            <th>Message</th>
-                            <th>Auteur</th>
-                            <th>Motif</th>
-                            <th>Signalé par</th>
-                            <th>Date</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${reportsList.map(r => `<tr>
-                            <td title="${this.escapeHtml(r.content || '')}">${this.escapeHtml(this.truncate(r.content || '', 50))}</td>
-                            <td>${this.escapeHtml(r.author_name || '-')}</td>
-                            <td>${this.escapeHtml(r.reason || '-')}</td>
-                            <td>${this.escapeHtml(r.reporter_name || '-')}</td>
-                            <td>${r.created_at ? this.formatDate(new Date(r.created_at)) : '-'}</td>
-                            <td class="action-cell">
-                                <button class="btn btn-sm btn-outline" onclick="App.handleReport(${r.id}, 'dismiss')">Ignorer</button>
-                                <button class="btn btn-sm btn-danger" onclick="App.handleReport(${r.id}, 'delete')">Supprimer msg</button>
-                                <button class="btn btn-sm btn-danger" onclick="App.handleReport(${r.id}, 'suspend')">Suspendre auteur</button>
-                            </td>
-                        </tr>`).join('')}
-                    </tbody>
-                </table></div>`}
-            </div>
-
-            <div class="admin-section">
-                <h3>Gestion des salons</h3>
-                <button class="btn btn-primary" onclick="App.showCreateGroupModal()">Créer un salon</button>
-            </div>
-        </div>`;
-
-        container.innerHTML = html;
-    },
-
-    showCreateGroupModal() {
-        let modal = document.getElementById('createGroupModal');
-        if (!modal) {
-            modal = document.createElement('div');
-            modal.id = 'createGroupModal';
-            modal.className = 'modal-overlay';
-            modal.innerHTML = `<div class="modal">
-                <div class="modal-header">
-                    <h3>Créer un salon</h3>
-                    <button class="modal-close" onclick="App.hideModal('createGroupModal')">✕</button>
-                </div>
-                <div class="modal-body">
-                    <form id="createGroupForm" onsubmit="event.preventDefault();App.handleCreateGroup()">
-                        <div class="form-group">
-                            <label>Nom du salon *</label>
-                            <input type="text" name="name" class="form-input" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Type</label>
-                            <select name="type" class="form-input">
-                                <option value="general">Général</option>
-                                <option value="announcement">Annonces</option>
-                                <option value="clinical_cases">Cas cliniques</option>
-                                <option value="scientific">Scientifique</option>
-                                <option value="other">Autre</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Description</label>
-                            <textarea name="description" class="form-input" rows="3"></textarea>
-                        </div>
-                        <button type="submit" class="btn btn-primary btn-block">Créer</button>
-                    </form>
-                </div>
-            </div>`;
-            document.body.appendChild(modal);
-        }
-        this.showModal('createGroupModal');
-    },
-
-    async handleCreateGroup() {
-        const form = document.getElementById('createGroupForm');
-        if (!form) return;
-        const name = form.querySelector('[name="name"]').value.trim();
-        const type = form.querySelector('[name="type"]').value;
-        const description = form.querySelector('[name="description"]').value.trim();
-        if (!name) return;
-
-        await this.createGroup(name, type, description);
-        this.hideModal('createGroupModal');
-        form.reset();
-    },
-
-    async approveMember(id) {
+    async rejectMember(memberId) {
+        const reason = prompt('Raison du refus (optionnel) :');
         try {
-            await this.api('admin.php?action=approve', {
+            const data = await this.api('admin.php?action=reject_member', {
                 method: 'POST',
-                body: { user_id: id },
+                body: { member_id: memberId, reason: reason || '' }
             });
-            this.showToast('Membre approuvé', 'success');
-            this.loadAdminDashboard();
-        } catch (err) {
-            this.showToast(err.message, 'error');
+            if (data.success) {
+                this.showToast('Membre refuse.', 'success');
+                this.state.pendingMembers = this.state.pendingMembers.filter(m => m.id !== memberId);
+                this.renderAdminDashboard();
+            }
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
-    async rejectMember(id) {
-        if (!confirm('Refuser cette demande d\'inscription ?')) return;
-        try {
-            await this.api('admin.php?action=reject', {
-                method: 'POST',
-                body: { user_id: id },
-            });
-            this.showToast('Demande refusée', 'success');
-            this.loadAdminDashboard();
-        } catch (err) {
-            this.showToast(err.message, 'error');
-        }
-    },
-
-    async suspendMember(id) {
+    async suspendMember(memberId) {
         if (!confirm('Suspendre ce membre ?')) return;
+
         try {
-            await this.api('admin.php?action=suspend', {
+            const data = await this.api('admin.php?action=suspend_member', {
                 method: 'POST',
-                body: { user_id: id },
+                body: { member_id: memberId }
             });
-            this.showToast('Membre suspendu', 'success');
-            this.loadAdminDashboard();
-        } catch (err) {
-            this.showToast(err.message, 'error');
+            if (data.success) {
+                this.showToast('Membre suspendu.', 'success');
+                this.loadAdminDashboard();
+            }
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
-    async handleReport(id, action) {
+    async handleReport(reportId, action) {
         try {
-            await this.api('admin.php?action=handle-report', {
+            const data = await this.api('admin.php?action=handle_report', {
                 method: 'POST',
-                body: { report_id: id, action: action },
+                body: { report_id: reportId, action: action }
             });
-            this.showToast('Signalement traité', 'success');
-            this.loadAdminDashboard();
-        } catch (err) {
-            this.showToast(err.message, 'error');
+            if (data.success) {
+                const actionLabel = action === 'dismiss' ? 'Signalement ignore.' : 'Message supprime.';
+                this.showToast(actionLabel, 'success');
+                this.state.reports = this.state.reports.filter(r => r.id !== reportId);
+                this.renderAdminDashboard();
+            }
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
-    async manageMemberRole(userId, newRole) {
-        if (!confirm(`Changer le rôle de ce membre en "${this.getRoleLabel(newRole)}" ?`)) return;
+    async manageMemberRole(memberId, newRole) {
         try {
-            await this.api('admin.php?action=change-role', {
+            const data = await this.api('admin.php?action=change_role', {
                 method: 'POST',
-                body: { user_id: userId, role: newRole },
+                body: { member_id: memberId, role: newRole }
             });
-            this.showToast('Rôle modifié', 'success');
-            this.loadAdminDashboard();
-        } catch (err) {
-            this.showToast(err.message, 'error');
+            if (data.success) {
+                this.showToast('Role modifie avec succes.', 'success');
+                this.loadAdminDashboard();
+            }
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
     // =========================================================================
-    // NOTIFICATIONS
+    // 18. NOTIFICATIONS
     // =========================================================================
     async loadNotifications() {
         try {
             const data = await this.api('notifications.php?action=list');
-            this.renderNotifications(data?.notifications || []);
-        } catch (err) {
-            // Silently fail
+            this.state.notifications = data.notifications || [];
+            this.renderNotifications();
+        } catch (e) {
+            /* silent */
         }
     },
 
-    renderNotifications(notifs) {
-        const container = document.getElementById('notificationsDropdown');
-        if (!container) return;
+    renderNotifications() {
+        const dropdown = document.getElementById('notificationsDropdown');
+        if (!dropdown) return;
 
-        if (notifs.length === 0) {
-            container.innerHTML =
-                '<div class="notif-empty"><p>Aucune notification</p></div>';
+        if (this.state.notifications.length === 0) {
+            dropdown.innerHTML = '<div class="notif-empty">Aucune notification</div>';
             return;
         }
 
-        container.innerHTML = notifs
-            .map(n => {
-                const isUnread = !n.is_read;
-                const time = n.created_at
-                    ? this.timeAgo(new Date(n.created_at))
-                    : '';
+        let html = '';
+        this.state.notifications.forEach(notif => {
+            const readClass = notif.read ? 'notif-read' : 'notif-unread';
+            let icon = '&#128276;';
+            if (notif.type === 'message') icon = '&#128172;';
+            else if (notif.type === 'mention') icon = '@';
+            else if (notif.type === 'approval') icon = '&#10004;';
+            else if (notif.type === 'event') icon = '&#128197;';
 
-                return `<div class="notification-item ${isUnread ? 'unread' : ''}"
-                    onclick="App.handleNotificationClick(${n.id}, ${n.group_id || 'null'}, ${n.message_id || 'null'})">
-                    <div class="notif-content">
-                        <div class="notif-title">${this.escapeHtml(n.title || '')}</div>
-                        <div class="notif-body">${this.escapeHtml(n.body || '')}</div>
-                        <div class="notif-time">${time}</div>
-                    </div>
-                    ${isUnread ? '<div class="notif-dot"></div>' : ''}
-                </div>`;
-            })
-            .join('');
+            html += '<div class="notif-item ' + readClass + '" onclick="App.handleNotificationClick(' + notif.id + ', \'' + this.escapeHtml(notif.type) + '\', ' + (notif.reference_id || 'null') + ')">'
+                + '<span class="notif-icon">' + icon + '</span>'
+                + '<div class="notif-content">'
+                + '<p class="notif-text">' + this.escapeHtml(notif.message || notif.text) + '</p>'
+                + '<span class="notif-time">' + this.timeAgo(notif.created_at) + '</span>'
+                + '</div>'
+                + '</div>';
+        });
 
-        // Add "mark all as read" button
-        const hasUnread = notifs.some(n => !n.is_read);
-        if (hasUnread) {
-            container.insertAdjacentHTML(
-                'beforeend',
-                '<div class="notif-footer"><button class="btn btn-sm btn-outline" onclick="App.markAllNotificationsRead()">Tout marquer comme lu</button></div>'
-            );
-        }
+        dropdown.innerHTML = html;
     },
 
-    async handleNotificationClick(notifId, groupId, messageId) {
-        // Mark as read
+    async handleNotificationClick(notifId, type, referenceId) {
         try {
-            await this.api('notifications.php?action=read', {
+            await this.api('notifications.php?action=mark_read', {
                 method: 'POST',
-                body: { notification_id: notifId },
+                body: { notification_id: notifId }
             });
-        } catch (err) {
-            // Continue anyway
+        } catch (e) {
+            /* silent */
         }
 
-        // Navigate
+        switch (type) {
+            case 'message':
+                if (referenceId) {
+                    const group = this.state.groups.find(g => g.id === referenceId);
+                    if (group) this.openGroup(group);
+                }
+                break;
+            case 'approval':
+                this.showView('admin');
+                break;
+            case 'event':
+                this.showView('agenda');
+                break;
+        }
+
         this.toggleNotifications();
-        if (groupId) {
-            await this.openGroup(groupId);
-            if (messageId) {
-                setTimeout(() => this.scrollToMessage(messageId), 500);
-            }
-        }
-    },
-
-    async markAllNotificationsRead() {
-        try {
-            await this.api('notifications.php?action=read-all', {
-                method: 'POST',
-            });
-            this.loadNotifications();
-            this.showToast('Notifications marquées comme lues', 'success');
-        } catch (err) {
-            this.showToast(err.message, 'error');
-        }
+        this.loadNotifications();
     },
 
     toggleNotifications() {
-        const dd = document.getElementById('notificationsDropdown');
-        if (!dd) return;
+        const dropdown = document.getElementById('notificationsDropdown');
+        if (!dropdown) return;
 
-        const isVisible = !dd.classList.contains('hidden');
-        if (isVisible) {
-            dd.classList.add('hidden');
-        } else {
-            dd.classList.remove('hidden');
+        this.state.notificationsOpen = !this.state.notificationsOpen;
+        dropdown.style.display = this.state.notificationsOpen ? '' : 'none';
+
+        if (this.state.notificationsOpen) {
             this.loadNotifications();
         }
     },
 
     // =========================================================================
-    // MODALS
+    // 19. MODALS
     // =========================================================================
     showModal(modalId) {
         const modal = document.getElementById(modalId);
         if (modal) {
-            modal.classList.add('active');
+            modal.style.display = 'flex';
             document.body.style.overflow = 'hidden';
-            // Focus first input
-            const firstInput = modal.querySelector(
-                'input:not([type="hidden"]):not([type="file"]), textarea, select'
-            );
-            if (firstInput) {
-                setTimeout(() => firstInput.focus(), 100);
-            }
         }
     },
 
     hideModal(modalId) {
         const modal = document.getElementById(modalId);
         if (modal) {
-            modal.classList.remove('active');
+            modal.style.display = 'none';
+        }
+        const anyVisible = document.querySelector('.modal[style*="display: flex"]');
+        if (!anyVisible) {
             document.body.style.overflow = '';
         }
     },
 
     hideAllModals() {
-        document.querySelectorAll('.modal-overlay').forEach(m => {
-            m.classList.remove('active');
+        document.querySelectorAll('.modal').forEach(modal => {
+            modal.style.display = 'none';
         });
         document.body.style.overflow = '';
     },
 
-    showReportModal(msgId) {
-        this.state.reportingMessageId = msgId;
-        const reasonSelect = document.getElementById('reportReason');
-        const commentArea = document.getElementById('reportComment');
-        if (reasonSelect) reasonSelect.value = '';
-        if (commentArea) commentArea.value = '';
+    showReportModal(messageId) {
+        const modal = document.getElementById('reportModal');
+        if (!modal) return;
+
+        const form = document.getElementById('reportForm');
+        if (form) {
+            form.reset();
+            let hiddenInput = form.querySelector('input[name="message_id"]');
+            if (!hiddenInput) {
+                hiddenInput = document.createElement('input');
+                hiddenInput.type = 'hidden';
+                hiddenInput.name = 'message_id';
+                form.appendChild(hiddenInput);
+            }
+            hiddenInput.value = messageId;
+        }
+
         this.showModal('reportModal');
     },
 
     async submitReport() {
-        const reason = document.getElementById('reportReason')?.value;
-        const comment = document.getElementById('reportComment')?.value || '';
+        const form = document.getElementById('reportForm');
+        if (!form) return;
+
+        const messageId = form.querySelector('input[name="message_id"]')?.value;
+        const reason = form.querySelector('[name="reason"]')?.value || '';
+        const details = form.querySelector('[name="details"]')?.value || '';
 
         if (!reason) {
-            this.showToast('Veuillez sélectionner un motif', 'error');
+            this.showToast('Veuillez selectionner une raison.', 'error');
             return;
         }
 
         try {
-            await this.api('messages.php?action=report', {
+            const data = await this.api('messages.php?action=report', {
                 method: 'POST',
-                body: {
-                    message_id: this.state.reportingMessageId,
-                    reason: reason,
-                    comment: comment,
-                },
+                body: { message_id: messageId, reason: reason, details: details }
             });
-            this.showToast('Message signalé aux administrateurs', 'success');
-            this.hideModal('reportModal');
-        } catch (err) {
-            this.showToast(err.message, 'error');
+            if (data.success) {
+                this.showToast('Signalement envoye. Merci.', 'success');
+                this.hideModal('reportModal');
+            }
+        } catch (e) {
+            this.showToast(e.message, 'error');
         }
     },
 
     showAnonymizationConfirmation(callback) {
-        this.state.anonCallback = callback;
         const modal = document.getElementById('anonModal');
-        if (modal) {
-            // Set up confirm button handler
-            const confirmBtn = modal.querySelector('.confirm-anon');
-            if (confirmBtn) {
-                confirmBtn.onclick = () => this.acceptAnonymization();
+        if (!modal) {
+            if (confirm('Les donnees patient doivent etre anonymisees avant envoi. Confirmez-vous que les donnees sont anonymisees ?')) {
+                if (callback) callback();
             }
-            const cancelBtn = modal.querySelector('.cancel-anon');
-            if (cancelBtn) {
-                cancelBtn.onclick = () => this.hideModal('anonModal');
-            }
+            return;
         }
+
+        this._anonCallback = callback;
+
+        const content = modal.querySelector('.modal-content') || modal;
+        content.innerHTML = '<div class="modal-header">'
+            + '<h3>Anonymisation requise</h3>'
+            + '<button class="modal-close" onclick="App.hideModal(\'anonModal\')">&times;</button>'
+            + '</div>'
+            + '<div class="modal-body">'
+            + '<p>Conformement a la reglementation, les donnees patient partagees dans les cas cliniques doivent etre <strong>anonymisees</strong>.</p>'
+            + '<p>En continuant, vous confirmez que toutes les donnees personnelles identifiables (nom, prenom, date de naissance, numero de dossier, etc.) ont ete supprimees ou remplacees.</p>'
+            + '<div class="modal-actions">'
+            + '<button class="btn btn-outline" onclick="App.hideModal(\'anonModal\')">Annuler</button>'
+            + '<button class="btn btn-primary" onclick="App.acceptAnonymization()">Je confirme l\'anonymisation</button>'
+            + '</div>'
+            + '</div>';
+
         this.showModal('anonModal');
     },
 
     acceptAnonymization() {
-        this.state.anonAccepted = true;
         this.hideModal('anonModal');
-        if (typeof this.state.anonCallback === 'function') {
-            this.state.anonCallback();
-            this.state.anonCallback = null;
+        if (this._anonCallback) {
+            this._anonCallback();
+            this._anonCallback = null;
         }
     },
 
     // =========================================================================
-    // UI HELPERS
+    // 20. UI HELPERS
     // =========================================================================
-    showToast(message, type = 'info') {
-        // Remove existing toasts
-        document.querySelectorAll('.toast').forEach(t => {
-            t.classList.remove('show');
-            setTimeout(() => t.remove(), 300);
-        });
+    showToast(message, type) {
+        type = type || 'info';
+
+        let container = document.getElementById('toastContainer');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'toastContainer';
+            container.style.cssText = 'position:fixed;top:20px;right:20px;z-index:10000;display:flex;flex-direction:column;gap:8px;';
+            document.body.appendChild(container);
+        }
 
         const toast = document.createElement('div');
-        toast.className = `toast toast-${type}`;
+        toast.className = 'toast toast-' + type;
 
-        const icons = { success: '✓', error: '✕', info: 'ℹ', warning: '⚠' };
-        const icon = icons[type] || icons.info;
+        const bgColors = { success: '#d4edda', error: '#f8d7da', warning: '#fff3cd', info: '#d1ecf1' };
+        const fgColors = { success: '#155724', error: '#721c24', warning: '#856404', info: '#0c5460' };
+        const icons = { success: '&#10004;', error: '&#10008;', warning: '&#9888;', info: '&#8505;' };
 
-        toast.innerHTML = `<span class="toast-icon">${icon}</span><span class="toast-message">${this.escapeHtml(message)}</span>`;
-        document.body.appendChild(toast);
+        toast.style.cssText = 'display:flex;align-items:center;gap:8px;padding:12px 16px;border-radius:8px;'
+            + 'background:' + (bgColors[type] || bgColors.info) + ';'
+            + 'color:' + (fgColors[type] || fgColors.info) + ';'
+            + 'box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:14px;'
+            + 'animation:slideInRight 0.3s ease;min-width:280px;max-width:420px;';
 
-        // Trigger animation
-        requestAnimationFrame(() => {
-            toast.classList.add('show');
-        });
+        toast.innerHTML = '<span class="toast-icon">' + (icons[type] || icons.info) + '</span>'
+            + '<span class="toast-message">' + this.escapeHtml(message) + '</span>'
+            + '<button class="toast-close" onclick="this.parentElement.remove()">&times;</button>';
 
-        // Auto dismiss
-        const duration = type === 'error' ? 5000 : 3000;
+        container.appendChild(toast);
+
         setTimeout(() => {
-            toast.classList.remove('show');
+            toast.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateX(100%)';
             setTimeout(() => toast.remove(), 300);
-        }, duration);
+        }, 4000);
     },
 
     updateUserUI() {
         if (!this.state.user) return;
 
-        // Update topbar user button/avatar
-        const userBtn = document.getElementById('userMenuBtn');
-        if (userBtn) {
-            const initials = (
-                (this.state.user.first_name?.[0] || '') +
-                (this.state.user.last_name?.[0] || '')
-            ).toUpperCase();
+        const user = this.state.user;
+        const initials = ((user.first_name || '')[0] || '') + ((user.last_name || '')[0] || '');
 
-            if (this.state.user.profile_photo) {
-                userBtn.innerHTML = `<img src="/connect/${this.escapeHtml(this.state.user.profile_photo)}" alt="${initials}" class="topbar-avatar">`;
+        const topbarAvatar = document.querySelector('.topbar-avatar, .user-avatar');
+        if (topbarAvatar) {
+            if (user.avatar) {
+                topbarAvatar.innerHTML = '<img src="' + this.escapeHtml(user.avatar) + '" alt="' + this.escapeHtml(initials) + '">';
             } else {
-                userBtn.textContent = initials;
+                topbarAvatar.textContent = initials.toUpperCase();
             }
         }
 
-        // Update user name display
-        const userNameEl = document.getElementById('userName');
-        if (userNameEl) {
-            userNameEl.textContent = (this.state.user.first_name || '') + ' ' + (this.state.user.last_name || '');
+        const userName = document.querySelector('.topbar-username, .user-name');
+        if (userName) {
+            userName.textContent = user.first_name + ' ' + user.last_name;
         }
 
-        // Show/hide admin link
-        const adminLink = document.getElementById('adminLink');
+        const adminLink = document.querySelector('.admin-link, [data-view="admin"]');
         if (adminLink) {
-            adminLink.classList.toggle('hidden', !this.isAdmin());
-        }
-
-        // Show/hide admin tab on mobile
-        const adminTab = document.querySelector('.mobile-tab[data-view="admin"]');
-        if (adminTab) {
-            adminTab.classList.toggle('hidden', !this.isAdmin());
+            adminLink.style.display = this.isAdmin() ? '' : 'none';
         }
     },
 
     goBack() {
         if (this.state.isMobile) {
-            document.getElementById('sidebar')?.classList.remove('hidden');
-            document.getElementById('mainContent')?.classList.add('hidden');
+            const sidebar = document.getElementById('sidebar');
+            const mainContent = document.getElementById('mainContent');
+            if (sidebar) sidebar.classList.remove('hidden');
+            if (mainContent) mainContent.classList.add('hidden');
         }
     },
 
     showLoading(container) {
-        if (typeof container === 'string') {
-            container = document.getElementById(container);
-        }
-        if (container) {
-            container.innerHTML =
-                '<div class="loading-spinner"><div class="spinner"></div></div>';
+        const target = typeof container === 'string' ? document.getElementById(container) : container;
+        if (target) {
+            const loader = document.createElement('div');
+            loader.className = 'loading-spinner';
+            loader.innerHTML = '<div class="spinner"></div><p>Chargement...</p>';
+            target.appendChild(loader);
         }
     },
 
     hideLoading(container) {
-        if (typeof container === 'string') {
-            container = document.getElementById(container);
-        }
-        if (container) {
-            const spinner = container.querySelector('.loading-spinner');
-            if (spinner) spinner.remove();
+        const target = typeof container === 'string' ? document.getElementById(container) : container;
+        if (target) {
+            const loader = target.querySelector('.loading-spinner');
+            if (loader) loader.remove();
         }
     },
 
     // =========================================================================
-    // UTILITIES
+    // 21. UTILITIES
     // =========================================================================
     escapeHtml(str) {
         if (str === null || str === undefined) return '';
-        const s = String(str);
-        const div = document.createElement('div');
-        div.textContent = s;
-        return div.innerHTML;
+        str = String(str);
+        const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+        return str.replace(/[&<>"']/g, function(c) { return map[c]; });
     },
 
     linkify(text) {
         if (!text) return '';
-        // URLs
         text = text.replace(
-            /(https?:\/\/[^\s<>"']+)/g,
+            /(https?:\/\/[^\s<]+[^\s<.,;:!?\])'">\-])/gi,
             '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
         );
-        // Email addresses
         text = text.replace(
-            /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g,
+            /([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/gi,
             '<a href="mailto:$1">$1</a>'
         );
-        // Newlines to <br>
         text = text.replace(/\n/g, '<br>');
         return text;
     },
 
-    formatTime(date) {
-        if (!(date instanceof Date) || isNaN(date.getTime())) return '';
-        return date.toLocaleTimeString('fr-FR', {
-            hour: '2-digit',
-            minute: '2-digit',
-        });
+    formatTime(dateStr) {
+        if (!dateStr) return '';
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return '';
+        return d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
     },
 
-    formatDate(date) {
-        if (!(date instanceof Date) || isNaN(date.getTime())) return '';
+    formatDate(dateStr) {
+        if (!dateStr) return '';
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return '';
         const today = new Date();
         const yesterday = new Date(today);
         yesterday.setDate(yesterday.getDate() - 1);
 
-        if (date.toDateString() === today.toDateString()) {
+        if (d.toDateString() === today.toDateString()) {
             return "Aujourd'hui";
         }
-        if (date.toDateString() === yesterday.toDateString()) {
+        if (d.toDateString() === yesterday.toDateString()) {
             return 'Hier';
         }
-        return date.toLocaleDateString('fr-FR', {
+
+        const options = { day: 'numeric', month: 'long' };
+        if (d.getFullYear() !== today.getFullYear()) {
+            options.year = 'numeric';
+        }
+        return d.toLocaleDateString('fr-FR', options);
+    },
+
+    formatDateTime(dateStr) {
+        if (!dateStr) return '';
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return '';
+        return d.toLocaleDateString('fr-FR', {
             day: 'numeric',
-            month: 'long',
-            year: date.getFullYear() !== today.getFullYear() ? 'numeric' : undefined,
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
         });
     },
 
-    formatDateTime(date) {
-        if (!(date instanceof Date) || isNaN(date.getTime())) return '';
-        return (
-            this.formatDate(date) +
-            ' à ' +
-            this.formatTime(date)
-        );
-    },
+    timeAgo(dateStr) {
+        if (!dateStr) return '';
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return '';
 
-    timeAgo(date) {
-        if (!(date instanceof Date) || isNaN(date.getTime())) return '';
-        const seconds = Math.floor((new Date() - date) / 1000);
+        const now = new Date();
+        const diffMs = now - d;
+        const diffSec = Math.floor(diffMs / 1000);
+        const diffMin = Math.floor(diffSec / 60);
+        const diffHour = Math.floor(diffMin / 60);
+        const diffDay = Math.floor(diffHour / 24);
+        const diffWeek = Math.floor(diffDay / 7);
+        const diffMonth = Math.floor(diffDay / 30);
 
-        if (seconds < 30) return "à l'instant";
-        if (seconds < 60) return `il y a ${seconds}s`;
-
-        const minutes = Math.floor(seconds / 60);
-        if (minutes < 60) return `il y a ${minutes} min`;
-
-        const hours = Math.floor(minutes / 60);
-        if (hours < 24) return `il y a ${hours}h`;
-
-        const days = Math.floor(hours / 24);
-        if (days === 1) return 'hier';
-        if (days < 7) return `il y a ${days}j`;
-
-        const weeks = Math.floor(days / 7);
-        if (weeks < 4) return `il y a ${weeks} sem.`;
-
-        return this.formatDate(date);
+        if (diffSec < 30) return "a l'instant";
+        if (diffSec < 60) return 'il y a ' + diffSec + ' s';
+        if (diffMin < 60) return 'il y a ' + diffMin + ' min';
+        if (diffHour < 24) return 'il y a ' + diffHour + ' h';
+        if (diffDay < 7) return 'il y a ' + diffDay + ' j';
+        if (diffWeek < 5) return 'il y a ' + diffWeek + ' sem';
+        if (diffMonth < 12) return 'il y a ' + diffMonth + ' mois';
+        return this.formatDate(dateStr);
     },
 
     formatFileSize(bytes) {
         if (!bytes || bytes === 0) return '0 o';
-        const sizes = ['o', 'Ko', 'Mo', 'Go', 'To'];
-        const i = Math.floor(Math.log(bytes) / Math.log(1024));
-        const val = bytes / Math.pow(1024, i);
-        return (i === 0 ? val : val.toFixed(1)) + ' ' + sizes[i];
+        bytes = parseInt(bytes);
+        if (bytes < 1024) return bytes + ' o';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' Ko';
+        if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' Mo';
+        return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' Go';
     },
 
     getFileIcon(mimeType) {
-        if (!mimeType) return '📄';
-        const type = mimeType.toLowerCase();
-        if (type.includes('pdf')) return '📕';
-        if (type.includes('word') || type.includes('document') || type.includes('docx') || type.includes('doc')) return '📘';
-        if (type.includes('presentation') || type.includes('powerpoint') || type.includes('pptx') || type.includes('ppt')) return '📙';
-        if (type.includes('spreadsheet') || type.includes('excel') || type.includes('xlsx') || type.includes('xls') || type.includes('csv')) return '📗';
-        if (type.includes('image') || type.includes('png') || type.includes('jpg') || type.includes('jpeg') || type.includes('gif')) return '🖼';
-        if (type.includes('video') || type.includes('mp4') || type.includes('avi') || type.includes('mov')) return '🎬';
-        if (type.includes('audio') || type.includes('mp3') || type.includes('wav')) return '🎵';
-        if (type.includes('zip') || type.includes('rar') || type.includes('tar') || type.includes('compressed') || type.includes('archive')) return '📦';
-        if (type.includes('text') || type.includes('txt')) return '📝';
-        if (type.includes('html') || type.includes('css') || type.includes('javascript') || type.includes('json')) return '💻';
-        return '📄';
+        if (!mimeType) return '&#128196;';
+        if (mimeType.startsWith('image/')) return '&#128444;';
+        if (mimeType.startsWith('video/')) return '&#127916;';
+        if (mimeType.startsWith('audio/')) return '&#127925;';
+        if (mimeType.indexOf('pdf') !== -1) return '&#128213;';
+        if (mimeType.indexOf('word') !== -1 || mimeType.indexOf('document') !== -1) return '&#128221;';
+        if (mimeType.indexOf('sheet') !== -1 || mimeType.indexOf('excel') !== -1 || mimeType.indexOf('csv') !== -1) return '&#128202;';
+        if (mimeType.indexOf('presentation') !== -1 || mimeType.indexOf('powerpoint') !== -1) return '&#128253;';
+        if (mimeType.indexOf('zip') !== -1 || mimeType.indexOf('rar') !== -1 || mimeType.indexOf('tar') !== -1 || mimeType.indexOf('gz') !== -1) return '&#128451;';
+        if (mimeType.indexOf('text') !== -1) return '&#128195;';
+        if (mimeType.indexOf('html') !== -1 || mimeType.indexOf('xml') !== -1 || mimeType.indexOf('json') !== -1) return '&#128187;';
+        return '&#128196;';
     },
 
-    truncate(str, maxLength) {
-        if (!str) return '';
-        if (str.length <= maxLength) return str;
-        return str.substring(0, maxLength) + '...';
-    },
-
-    debounce(fn, ms) {
+    debounce(fn, delay) {
         let timer;
-        return (...args) => {
+        return function() {
+            const args = arguments;
+            const context = this;
             clearTimeout(timer);
-            timer = setTimeout(() => fn.apply(this, args), ms);
+            timer = setTimeout(function() {
+                fn.apply(context, args);
+            }, delay);
         };
     },
 
-    throttle(fn, ms) {
-        let lastCall = 0;
-        return (...args) => {
-            const now = Date.now();
-            if (now - lastCall >= ms) {
-                lastCall = now;
-                fn.apply(this, args);
+    throttle(fn, limit) {
+        let inThrottle = false;
+        return function() {
+            const args = arguments;
+            const context = this;
+            if (!inThrottle) {
+                fn.apply(context, args);
+                inThrottle = true;
+                setTimeout(function() {
+                    inThrottle = false;
+                }, limit);
             }
         };
     },
 
     generateTempId() {
-        return 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        return 'tmp_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
     },
 
-    copyToClipboard(text) {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text).then(() => {
-                this.showToast('Copié dans le presse-papier', 'success');
-            }).catch(() => {
-                this.fallbackCopyToClipboard(text);
-            });
-        } else {
-            this.fallbackCopyToClipboard(text);
-        }
-    },
-
-    fallbackCopyToClipboard(text) {
-        const textarea = document.createElement('textarea');
-        textarea.value = text;
-        textarea.style.position = 'fixed';
-        textarea.style.left = '-9999px';
-        document.body.appendChild(textarea);
-        textarea.select();
+    async copyToClipboard(text) {
         try {
-            document.execCommand('copy');
-            this.showToast('Copié dans le presse-papier', 'success');
-        } catch (err) {
-            this.showToast('Impossible de copier', 'error');
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.style.cssText = 'position:fixed;left:-9999px;';
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+            }
+            this.showToast('Copie dans le presse-papiers.', 'success');
+        } catch (e) {
+            this.showToast('Impossible de copier.', 'error');
         }
-        textarea.remove();
     },
 
     // =========================================================================
-    // PWA / SERVICE WORKER
+    // 22. PWA / SERVICE WORKER
     // =========================================================================
     registerServiceWorker() {
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker
-                .register('/connect/sw.js')
-                .then(registration => {
-                    // Check for updates periodically
-                    setInterval(() => {
-                        registration.update();
-                    }, 60 * 60 * 1000); // Every hour
+            navigator.serviceWorker.register('/connect/sw.js')
+                .then(function(registration) {
+                    registration.addEventListener('updatefound', function() {
+                        const newWorker = registration.installing;
+                        if (newWorker) {
+                            newWorker.addEventListener('statechange', function() {
+                                if (newWorker.state === 'activated') {
+                                    App.showToast('Mise a jour disponible. Rechargez la page.', 'info');
+                                }
+                            });
+                        }
+                    });
                 })
-                .catch(err => {
-                    // Service worker registration failed - not critical
+                .catch(function() {
+                    /* silent */
                 });
         }
     },
 
     requestNotificationPermission() {
         if ('Notification' in window && Notification.permission === 'default') {
-            // Don't request immediately, wait for user interaction
-            const requestOnInteraction = () => {
-                Notification.requestPermission().then(permission => {
-                    if (permission === 'granted') {
-                        this.subscribeToPushNotifications();
-                    }
-                });
-                document.removeEventListener('click', requestOnInteraction);
-            };
-            // Request after first user interaction with the app
-            setTimeout(() => {
-                document.addEventListener('click', requestOnInteraction, { once: true });
-            }, 5000);
-        } else if ('Notification' in window && Notification.permission === 'granted') {
-            this.subscribeToPushNotifications();
-        }
-    },
-
-    async subscribeToPushNotifications() {
-        if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
-
-        try {
-            const registration = await navigator.serviceWorker.ready;
-            const subscription = await registration.pushManager.subscribe({
-                userVisibleOnly: true,
-                applicationServerKey: this.urlBase64ToUint8Array(
-                    // This would be the VAPID public key from the server
-                    document.querySelector('meta[name="vapid-key"]')?.content || ''
-                ),
-            });
-
-            // Send subscription to server
-            await this.api('notifications.php?action=subscribe', {
-                method: 'POST',
-                body: { subscription: JSON.stringify(subscription) },
-            });
-        } catch (err) {
-            // Push subscription failed - not critical
-        }
-    },
-
-    urlBase64ToUint8Array(base64String) {
-        if (!base64String) return new Uint8Array(0);
-        const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
-        const base64 = (base64String + padding)
-            .replace(/-/g, '+')
-            .replace(/_/g, '/');
-        const rawData = window.atob(base64);
-        const outputArray = new Uint8Array(rawData.length);
-        for (let i = 0; i < rawData.length; ++i) {
-            outputArray[i] = rawData.charCodeAt(i);
-        }
-        return outputArray;
-    },
-};
-
-// =========================================================================
-// Initialize on DOM ready
-// =========================================================================
-document.addEventListener('DOMContentLoaded', () => {
-    App.init();
-});
-
-// Handle PWA install prompt
-window.addEventListener('beforeinstallprompt', (e) => {
-    e.preventDefault();
-    const installBtn = document.getElementById('installBtn');
-    if (installBtn) {
-        installBtn.classList.remove('hidden');
-        installBtn.addEventListener('click', () => {
-            e.prompt();
-            e.userChoice.then(choice => {
-                if (choice.outcome === 'accepted') {
-                    installBtn.classList.add('hidden');
+            Notification.requestPermission().then(function(permission) {
+                if (permission === 'granted') {
+                    App.showToast('Notifications activees.', 'success');
                 }
             });
-        });
-    }
-});
+        }
+    },
 
-// Handle network status
-window.addEventListener('online', () => {
-    App.showToast('Connexion rétablie', 'success');
-    if (App.state.user && App.state.user.role !== 'pending') {
-        App.startPolling();
-    }
-});
+    // =========================================================================
+    // INTERNAL: directory search timer
+    // =========================================================================
+    _dirSearchTimer: null,
+    _anonCallback: null
+};
 
-window.addEventListener('offline', () => {
-    App.showToast('Connexion perdue', 'warning');
-    App.stopPolling();
+// =============================================================================
+// 23-24. DOMCONTENTLOADED + CSS ANIMATIONS
+// =============================================================================
+document.addEventListener('DOMContentLoaded', function() {
+    var style = document.createElement('style');
+    style.textContent = '@keyframes slideInRight {'
+        + 'from { transform: translateX(100%); opacity: 0; }'
+        + 'to { transform: translateX(0); opacity: 1; }'
+        + '}'
+        + '@keyframes highlightMsg {'
+        + '0% { background-color: rgba(255, 193, 7, 0.3); }'
+        + '100% { background-color: transparent; }'
+        + '}'
+        + '.message-bubble.highlight {'
+        + 'animation: highlightMsg 2s ease;'
+        + '}'
+        + '.toast-close {'
+        + 'background: none; border: none; font-size: 18px; cursor: pointer;'
+        + 'margin-left: 8px; opacity: 0.6; line-height: 1;'
+        + '}'
+        + '.toast-close:hover { opacity: 1; }'
+        + '.loading-spinner {'
+        + 'display: flex; flex-direction: column; align-items: center;'
+        + 'justify-content: center; padding: 40px; color: #666;'
+        + '}'
+        + '.spinner {'
+        + 'width: 32px; height: 32px; border: 3px solid #e0e0e0;'
+        + 'border-top-color: #1a73e8; border-radius: 50%;'
+        + 'animation: spin 0.8s linear infinite;'
+        + '}'
+        + '@keyframes spin { to { transform: rotate(360deg); } }';
+    document.head.appendChild(style);
+
+    App.init();
 });

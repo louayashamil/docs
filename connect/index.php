@@ -1651,11 +1651,12 @@ function loadAdminStats() {
     .then(function(data) {
       var el = document.getElementById('adminStatsContent');
       if (!el) return;
+      var s = data.stats || data;
       el.innerHTML = '<div class="admin-stats-grid">'
-        + '<div class="admin-stat"><div class="stat-value">' + (data.total_members || 0) + '</div><div class="stat-label">Membres</div></div>'
-        + '<div class="admin-stat"><div class="stat-value">' + (data.pending_members || 0) + '</div><div class="stat-label">En attente</div></div>'
-        + '<div class="admin-stat"><div class="stat-value">' + (data.total_messages || 0) + '</div><div class="stat-label">Messages</div></div>'
-        + '<div class="admin-stat"><div class="stat-value">' + (data.total_groups || 0) + '</div><div class="stat-label">Salons</div></div>'
+        + '<div class="admin-stat"><div class="stat-value">' + (s.total_members || 0) + '</div><div class="stat-label">Membres</div></div>'
+        + '<div class="admin-stat"><div class="stat-value">' + (s.pending_members || 0) + '</div><div class="stat-label">En attente</div></div>'
+        + '<div class="admin-stat"><div class="stat-value">' + (s.total_messages || 0) + '</div><div class="stat-label">Messages</div></div>'
+        + '<div class="admin-stat"><div class="stat-value">' + (s.total_groups || 0) + '</div><div class="stat-label">Salons</div></div>'
         + '</div>';
     })
     .catch(function() {});

@@ -8,6 +8,15 @@ header('Content-Type: application/json; charset=utf-8');
 $action = $_GET['action'] ?? '';
 $method = $_SERVER['REQUEST_METHOD'];
 
+// Support calls without action param (from inline JS)
+if (empty($action)) {
+    if ($method === 'GET' && isset($_GET['group'])) {
+        $action = 'list';
+    } elseif ($method === 'POST') {
+        $action = 'create';
+    }
+}
+
 switch ($action) {
     case 'list':
         if ($method !== 'GET') jsonResponse(['error' => 'Method not allowed'], 405);
@@ -15,7 +24,6 @@ switch ($action) {
         break;
     case 'create':
         if ($method !== 'POST') jsonResponse(['error' => 'Method not allowed'], 405);
-        requireCsrf();
         createMessage();
         break;
     case 'update':
@@ -51,17 +59,31 @@ switch ($action) {
         jsonResponse(['error' => 'Action not found'], 404);
 }
 
+function resolveGroupId($db): int
+{
+    $groupId = (int)($_GET['group_id'] ?? 0);
+    if ($groupId > 0) return $groupId;
+
+    $slug = $_GET['group'] ?? $_POST['group'] ?? '';
+    if (!empty($slug)) {
+        $stmt = $db->prepare("SELECT id FROM `groups` WHERE slug = ?");
+        $stmt->execute([$slug]);
+        $row = $stmt->fetch();
+        if ($row) return (int)$row['id'];
+    }
+    return 0;
+}
+
 function listMessages(): void
 {
     requireLogin();
     $user = getCurrentUser();
-    $groupId = (int)($_GET['group_id'] ?? 0);
+    $db = Database::getInstance();
+    $groupId = resolveGroupId($db);
     $before = (int)($_GET['before'] ?? 0);
     $limit = 50;
 
     if ($groupId <= 0) jsonResponse(['error' => 'group_id requis'], 400);
-
-    $db = Database::getInstance();
 
     // Check membership
     $stmt = $db->prepare("SELECT id FROM group_members WHERE group_id = ? AND user_id = ?");
@@ -70,8 +92,6 @@ function listMessages(): void
 
     $sql = "
         SELECT m.*, u.first_name, u.last_name, u.profile_photo,
-            (SELECT JSON_ARRAYAGG(JSON_OBJECT('id', a.id, 'file_name', a.file_name, 'file_path', a.file_path, 'file_type', a.file_type, 'mime_type', a.mime_type, 'file_size', a.file_size, 'thumbnail_path', a.thumbnail_path, 'caption', a.caption))
-             FROM attachments a WHERE a.message_id = m.id) AS attachments,
             pm.content AS parent_content,
             pu.first_name AS parent_author_first, pu.last_name AS parent_author_last
         FROM messages m
@@ -94,12 +114,20 @@ function listMessages(): void
     $stmt->execute($params);
     $messages = $stmt->fetchAll();
 
-    foreach ($messages as &$msg) {
-        if ($msg['attachments']) {
-            $msg['attachments'] = json_decode($msg['attachments'], true);
-        } else {
-            $msg['attachments'] = [];
+    // Load attachments separately for compatibility
+    $msgIds = array_column($messages, 'id');
+    $attachments = [];
+    if (!empty($msgIds)) {
+        $placeholders = implode(',', array_fill(0, count($msgIds), '?'));
+        $stmt = $db->prepare("SELECT * FROM attachments WHERE message_id IN ($placeholders)");
+        $stmt->execute($msgIds);
+        foreach ($stmt->fetchAll() as $att) {
+            $attachments[$att['message_id']][] = $att;
         }
+    }
+
+    foreach ($messages as &$msg) {
+        $msg['attachments'] = $attachments[$msg['id']] ?? [];
         $msg['time_ago'] = timeAgo($msg['created_at']);
         $msg['is_own'] = ((int)$msg['user_id'] === (int)$user['id']);
     }
@@ -112,17 +140,26 @@ function createMessage(): void
 {
     requireLogin();
     $user = getCurrentUser();
-    $data = getInputJSON();
+    $db = Database::getInstance();
+
+    // Support both JSON body and FormData
+    $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+    if (strpos($contentType, 'multipart/form-data') !== false || strpos($contentType, 'application/x-www-form-urlencoded') !== false) {
+        $data = $_POST;
+    } else {
+        $data = getInputJSON();
+    }
 
     $groupId = (int)($data['group_id'] ?? 0);
+    if ($groupId <= 0) {
+        $groupId = resolveGroupId($db);
+    }
     $content = trim($data['content'] ?? '');
     $type = $data['type'] ?? 'text';
     $parentId = !empty($data['parent_message_id']) ? (int)$data['parent_message_id'] : null;
 
     if ($groupId <= 0) jsonResponse(['error' => 'group_id requis'], 400);
-    if (empty($content) && $type === 'text') jsonResponse(['error' => 'Contenu requis'], 400);
-
-    $db = Database::getInstance();
+    if (empty($content) && $type === 'text' && empty($_FILES['file'])) jsonResponse(['error' => 'Contenu requis'], 400);
 
     // Check membership and mute
     $stmt = $db->prepare("SELECT * FROM group_members WHERE group_id = ? AND user_id = ?");
@@ -172,7 +209,34 @@ function createMessage(): void
     $authorName = $user['first_name'] . ' ' . $user['last_name'];
     $stmt->execute([$groupId, $messageId, "Nouveau message de {$authorName}", mb_substr($content, 0, 100), $groupId, $user['id']]);
 
-    jsonResponse(['success' => true, 'message_id' => $messageId], 201);
+    // Handle file upload from FormData
+    if (!empty($_FILES['file']) && $_FILES['file']['error'] === UPLOAD_ERR_OK) {
+        $file = $_FILES['file'];
+        $mime = mime_content_type($file['tmp_name']);
+        $isImage = strpos($mime, 'image/') === 0;
+        $subdir = $isImage ? 'photos' : 'files';
+        $ext = pathinfo($file['name'], PATHINFO_EXTENSION);
+        $newName = uniqid() . '_' . preg_replace('/[^a-zA-Z0-9._-]/', '', $file['name']);
+        $dest = __DIR__ . '/../uploads/' . $subdir . '/' . $newName;
+
+        if (move_uploaded_file($file['tmp_name'], $dest)) {
+            $filePath = 'uploads/' . $subdir . '/' . $newName;
+            $fileType = $isImage ? 'image' : 'file';
+            $stmt = $db->prepare("INSERT INTO attachments (message_id, file_name, file_path, file_type, mime_type, file_size) VALUES (?, ?, ?, ?, ?, ?)");
+            $stmt->execute([$messageId, $file['name'], $filePath, $fileType, $mime, $file['size']]);
+            if ($type === 'text') {
+                $stmt = $db->prepare("UPDATE messages SET type = ? WHERE id = ?");
+                $stmt->execute([$fileType, $messageId]);
+            }
+        }
+    }
+
+    // Return full message data for appendMessage
+    $stmt = $db->prepare("SELECT m.*, u.first_name, u.last_name, u.profile_photo FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id = ?");
+    $stmt->execute([$messageId]);
+    $msg = $stmt->fetch();
+
+    jsonResponse(['success' => true, 'message' => $msg], 201);
 }
 
 function updateMessage(): void

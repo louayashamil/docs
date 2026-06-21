@@ -510,7 +510,7 @@ input,textarea,select{font-family:inherit;font-size:inherit}
     </div>
     <div class="group-list" id="groupList">
       <!-- Discussion générale - always prominent -->
-      <div class="group-item active" data-group="general" onclick="selectGroup(this,'general','Discussion générale')">
+      <div class="group-item active" data-group="discussion-generale" onclick="selectGroup(this,'discussion-generale','Discussion générale')">
         <div class="group-icon">&#128172;</div>
         <div class="group-info">
           <div class="group-name">Discussion g&eacute;n&eacute;rale</div>
@@ -532,7 +532,7 @@ input,textarea,select{font-family:inherit;font-size:inherit}
           </div>
           <span class="badge hidden" id="badge-cas-cliniques"></span>
         </div>
-        <div class="group-item" data-group="annonces" onclick="selectGroup(this,'annonces','Annonces scientifiques')">
+        <div class="group-item" data-group="annonces-officielles" onclick="selectGroup(this,'annonces-officielles','Annonces officielles')">
           <div class="group-icon">&#128227;</div>
           <div class="group-info">
             <div class="group-name">Annonces scientifiques</div>
@@ -540,7 +540,7 @@ input,textarea,select{font-family:inherit;font-size:inherit}
           </div>
           <span class="badge hidden" id="badge-annonces"></span>
         </div>
-        <div class="group-item" data-group="formation" onclick="selectGroup(this,'formation','Formation continue')">
+        <div class="group-item" data-group="congres-formations" onclick="selectGroup(this,'congres-formations','Congrès et formations')">
           <div class="group-icon">&#127891;</div>
           <div class="group-info">
             <div class="group-name">Formation continue</div>
@@ -548,7 +548,7 @@ input,textarea,select{font-family:inherit;font-size:inherit}
           </div>
           <span class="badge hidden" id="badge-formation"></span>
         </div>
-        <div class="group-item" data-group="chirurgie" onclick="selectGroup(this,'chirurgie','Techniques chirurgicales')">
+        <div class="group-item" data-group="retine" onclick="selectGroup(this,'retine','Rétine')">
           <div class="group-icon">&#9879;</div>
           <div class="group-info">
             <div class="group-name">Techniques chirurgicales</div>
@@ -1038,7 +1038,7 @@ var CURRENT_USER = <?= json_encode([
 var CURRENT_USER = null;
 <?php endif; ?>
 
-var currentGroup = 'general';
+var currentGroup = 'discussion-generale';
 var currentZoom = 1;
 var pendingFile = null;
 var confirmCallback = null;
@@ -1159,7 +1159,7 @@ function handleForgot(e) {
 }
 
 function handleLogout() {
-  fetch(BASE_URL + '/api/logout.php', {
+  fetch(BASE_URL + '/api/auth.php?action=logout', {
     method: 'POST',
     headers: { 'X-CSRF-TOKEN': CSRF }
   }).finally(function() { window.location.href = BASE_URL + '/'; });

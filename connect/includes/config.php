@@ -1,8 +1,8 @@
 <?php
-define('DB_HOST', 'localhost');
-define('DB_NAME', 'nadar_connect');
-define('DB_USER', 'root');
-define('DB_PASS', '');
+define('DB_HOST', 'shareddb-u.hosting.stackcp.net');
+define('DB_NAME', 'connect_bd-313333ac55');
+define('DB_USER', 'connect_user');
+define('DB_PASS', 'Za3lanlih1@');
 define('UPLOAD_MAX_IMAGE', 20 * 1024 * 1024);
 define('UPLOAD_MAX_DOC', 100 * 1024 * 1024);
 define('UPLOAD_MAX_VIDEO', 100 * 1024 * 1024);

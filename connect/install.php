@@ -1,10 +1,10 @@
 <?php
 require_once __DIR__ . '/includes/config.php';
 
-// Connect without database name first to create it
+// Connect to existing database
 try {
     $pdo = new PDO(
-        'mysql:host=' . DB_HOST . ';charset=utf8mb4',
+        'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=utf8mb4',
         DB_USER,
         DB_PASS,
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
@@ -12,9 +12,6 @@ try {
 } catch (PDOException $e) {
     die("Connection failed: " . $e->getMessage());
 }
-
-$pdo->exec("CREATE DATABASE IF NOT EXISTS `" . DB_NAME . "` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
-$pdo->exec("USE `" . DB_NAME . "`");
 
 // Create tables
 $pdo->exec("

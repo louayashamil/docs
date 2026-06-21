@@ -1,702 +1,827 @@
 /**
- * NADAR Connect - Complete JavaScript SPA
- * Vanilla JS (ES6+), no frameworks
+ * NADAR Connect - Application JavaScript SPA
+ * Plateforme de messagerie communautaire pour ophtalmologistes
+ * Vanilla ES6+ - Aucun framework
  */
 
-const BASE_URL = '/connect';
-
-const NadarConnect = {
+const App = {
+    // =========================================================================
+    // STATE
+    // =========================================================================
     state: {
-        currentUser: null,
-        currentGroup: null,
+        user: null,
         groups: [],
+        currentGroup: null,
         messages: [],
+        polling: null,
         unreadCounts: {},
-        pollingInterval: null,
-        currentView: 'chat',
-        replyingTo: null,
-        mentionDropdownVisible: false,
-        mentionQuery: '',
-        membersCache: [],
-        lastMessageId: null,
-        loadingMore: false,
-        pwaInstallPrompt: null,
-        isMobile: window.innerWidth <= 768,
-        autreExpanded: false,
+        lastMessageIds: {},
+        anonAccepted: false,
         attachments: [],
-        editingMessageId: null,
-        contextMenuTarget: null,
+        replyTo: null,
+        editingMessage: null,
+        csrfToken: '',
+        isMobile: window.innerWidth < 769,
+        searchTimer: null,
+        loadingOlder: false,
+        reportingMessageId: null,
+        anonCallback: null,
+        notificationsOpen: false,
+        currentView: 'chatView',
+        typingTimer: null,
+        onlineUsers: new Set(),
+        messageObserver: null,
+        touchStartY: 0,
+        touchStartX: 0,
         longPressTimer: null,
-        searchDebounceTimer: null,
-        composerMentionStart: -1
+        contextMessageId: null,
+        profileEditData: {},
     },
 
     // =========================================================================
     // INITIALIZATION
     // =========================================================================
-
-    init() {
-        this.checkAuth().then(user => {
-            if (user) {
-                this.state.currentUser = user;
-                this.showView('chat');
-                this.loadGroups();
-                this.startPolling();
-                this.loadNotifications();
-                this.renderUserInfo();
-            } else {
-                this.showView('login');
-            }
-        }).catch(() => {
-            this.showView('login');
-        });
-
+    async init() {
         this.setupEventListeners();
+        this.setupResizeHandler();
+        this.setupKeyboardShortcuts();
+        this.setupIntersectionObserver();
+        await this.checkAuth();
         this.registerServiceWorker();
-        this.setupPWAInstallPrompt();
+        this.requestNotificationPermission();
+    },
+
+    setupResizeHandler() {
+        let resizeTimer;
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(() => {
+                const wasMobile = this.state.isMobile;
+                this.state.isMobile = window.innerWidth < 769;
+                if (wasMobile !== this.state.isMobile) {
+                    this.handleResponsiveChange();
+                }
+            }, 150);
+        });
+    },
+
+    handleResponsiveChange() {
+        const sidebar = document.getElementById('sidebar');
+        const mainContent = document.getElementById('mainContent');
+        if (!sidebar || !mainContent) return;
+
+        if (this.state.isMobile) {
+            if (this.state.currentGroup) {
+                sidebar.classList.add('hidden');
+                mainContent.classList.remove('hidden');
+            } else {
+                sidebar.classList.remove('hidden');
+                mainContent.classList.add('hidden');
+            }
+        } else {
+            sidebar.classList.remove('hidden');
+            mainContent.classList.remove('hidden');
+        }
+    },
+
+    setupKeyboardShortcuts() {
+        document.addEventListener('keydown', (e) => {
+            // Ctrl+K or Cmd+K for search
+            if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+                e.preventDefault();
+                this.showSearch();
+                return;
+            }
+            // Escape to close modals/overlays
+            if (e.key === 'Escape') {
+                this.closeImageViewer();
+                this.hideSearch();
+                this.hideAllModals();
+                const dropdown = document.getElementById('notificationsDropdown');
+                if (dropdown && !dropdown.classList.contains('hidden')) {
+                    dropdown.classList.add('hidden');
+                }
+            }
+        });
+    },
+
+    setupIntersectionObserver() {
+        if ('IntersectionObserver' in window) {
+            this.state.messageObserver = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        const img = entry.target;
+                        if (img.dataset.src) {
+                            img.src = img.dataset.src;
+                            delete img.dataset.src;
+                            this.state.messageObserver.unobserve(img);
+                        }
+                    }
+                });
+            }, { rootMargin: '200px' });
+        }
     },
 
     setupEventListeners() {
-        // Login form
-        const loginForm = document.getElementById('login-form');
+        // ---- Login form ----
+        const loginForm = document.getElementById('loginForm');
         if (loginForm) {
-            loginForm.addEventListener('submit', e => {
+            loginForm.addEventListener('submit', (e) => {
                 e.preventDefault();
-                const email = document.getElementById('login-email').value.trim();
-                const password = document.getElementById('login-password').value;
-                this.login(email, password);
+                const email = loginForm.querySelector('[name="email"]')?.value?.trim();
+                const password = loginForm.querySelector('[name="password"]')?.value;
+                if (email && password) {
+                    this.login(email, password);
+                }
             });
         }
 
-        // Register form
-        const registerForm = document.getElementById('register-form');
+        // ---- Register form ----
+        const registerForm = document.getElementById('registerForm');
         if (registerForm) {
-            registerForm.addEventListener('submit', e => {
+            registerForm.addEventListener('submit', (e) => {
                 e.preventDefault();
                 const formData = new FormData(registerForm);
                 this.register(formData);
             });
         }
 
-        // Forgot password form
-        const forgotForm = document.getElementById('forgot-password-form');
-        if (forgotForm) {
-            forgotForm.addEventListener('submit', e => {
+        // ---- Composer form ----
+        const composerForm = document.getElementById('composerForm');
+        if (composerForm) {
+            composerForm.addEventListener('submit', (e) => {
                 e.preventDefault();
-                const email = document.getElementById('forgot-email').value.trim();
-                this.forgotPassword(email);
+                this.sendMessage();
             });
         }
 
-        // Send message button
-        const sendBtn = document.getElementById('send-message-btn');
-        if (sendBtn) {
-            sendBtn.addEventListener('click', () => this.handleSendMessage());
-        }
+        // ---- Composer input auto-resize + Enter to send ----
+        const composerInput = document.getElementById('composerInput');
+        if (composerInput) {
+            composerInput.addEventListener('input', () => {
+                this.autoResizeTextarea(composerInput);
+            });
 
-        // Composer textarea
-        const composer = document.getElementById('message-composer');
-        if (composer) {
-            composer.addEventListener('keydown', e => {
+            composerInput.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
-                    this.handleSendMessage();
+                    this.sendMessage();
                 }
             });
-            composer.addEventListener('input', () => {
-                this.autoResizeComposer(composer);
-                this.handleMentionAutocomplete(composer);
+
+            composerInput.addEventListener('paste', (e) => {
+                const items = e.clipboardData?.items;
+                if (!items) return;
+                for (let i = 0; i < items.length; i++) {
+                    if (items[i].type.startsWith('image/')) {
+                        e.preventDefault();
+                        const file = items[i].getAsFile();
+                        if (file) {
+                            this.handleAttachment([file], 'image');
+                        }
+                        break;
+                    }
+                }
             });
         }
 
-        // File input
-        const fileInput = document.getElementById('file-input');
-        if (fileInput) {
-            fileInput.addEventListener('change', e => {
-                const files = Array.from(e.target.files);
-                if (files.length === 0) return;
-                const imageFiles = files.filter(f => f.type.startsWith('image/'));
-                const otherFiles = files.filter(f => !f.type.startsWith('image/'));
-                if (imageFiles.length > 0) this.showImagePreview(imageFiles);
-                if (otherFiles.length > 0) this.showFilePreview(otherFiles);
-                fileInput.value = '';
-            });
-        }
-
-        // Attachment button
-        const attachBtn = document.getElementById('attach-btn');
+        // ---- Attach button ----
+        const attachBtn = document.getElementById('attachBtn');
         if (attachBtn) {
             attachBtn.addEventListener('click', () => {
-                const fi = document.getElementById('file-input');
-                if (fi) fi.click();
+                document.getElementById('fileInput')?.click();
             });
         }
 
-        // Group list clicks (delegation)
-        const groupList = document.getElementById('group-list');
-        if (groupList) {
-            groupList.addEventListener('click', e => {
-                const item = e.target.closest('[data-group-id]');
-                if (item) {
-                    this.openGroup(parseInt(item.dataset.groupId, 10));
+        // ---- Photo button ----
+        const photoBtn = document.getElementById('photoBtn');
+        if (photoBtn) {
+            photoBtn.addEventListener('click', () => {
+                document.getElementById('photoInput')?.click();
+            });
+        }
+
+        // ---- Send button ----
+        const sendBtn = document.getElementById('sendBtn');
+        if (sendBtn) {
+            sendBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                this.sendMessage();
+            });
+        }
+
+        // ---- File input change ----
+        const fileInput = document.getElementById('fileInput');
+        if (fileInput) {
+            fileInput.addEventListener('change', (e) => {
+                if (e.target.files.length > 0) {
+                    this.handleAttachment(e.target.files, 'file');
+                    e.target.value = '';
                 }
             });
         }
 
-        // Modal close buttons
-        document.addEventListener('click', e => {
-            if (e.target.classList.contains('modal-close') || e.target.classList.contains('modal-overlay')) {
-                const modal = e.target.closest('.modal');
-                if (modal) this.hideModal(modal.id);
-            }
-        });
+        // ---- Photo input change ----
+        const photoInput = document.getElementById('photoInput');
+        if (photoInput) {
+            photoInput.addEventListener('change', (e) => {
+                if (e.target.files.length > 0) {
+                    this.handleAttachment(e.target.files, 'image');
+                    e.target.value = '';
+                }
+            });
+        }
 
-        // Search input
-        const searchInput = document.getElementById('search-input');
+        // ---- Search input ----
+        const searchInput = document.getElementById('searchInput');
         if (searchInput) {
-            searchInput.addEventListener('input', e => {
-                const query = e.target.value.trim();
-                this.searchDebounceTimer && clearTimeout(this.searchDebounceTimer);
-                this.searchDebounceTimer = setTimeout(() => {
-                    if (query.length >= 2) {
-                        this.search(query, {});
-                    } else {
-                        const sr = document.getElementById('search-results');
-                        if (sr) sr.innerHTML = '';
-                    }
-                }, 300);
+            searchInput.addEventListener('input', (e) => {
+                clearTimeout(this.state.searchTimer);
+                this.state.searchTimer = setTimeout(() => {
+                    this.search(e.target.value.trim());
+                }, 400);
+            });
+
+            searchInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    this.hideSearch();
+                }
             });
         }
 
-        // Image viewer (delegation)
-        document.addEventListener('click', e => {
-            if (e.target.classList.contains('chat-image')) {
-                this.openImageViewer(e.target.src);
+        // ---- Notification bell ----
+        const notifBell = document.getElementById('notifBadge')?.parentElement
+            || document.querySelector('.notification-bell');
+        if (notifBell) {
+            notifBell.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.toggleNotifications();
+            });
+        }
+
+        // ---- Modal close buttons ----
+        document.addEventListener('click', (e) => {
+            // Close button inside modals
+            if (e.target.classList.contains('modal-close') || e.target.closest('.modal-close')) {
+                const modal = e.target.closest('.modal-overlay');
+                if (modal) {
+                    modal.classList.remove('active');
+                    document.body.style.overflow = '';
+                }
+            }
+
+            // Click on overlay background
+            if (e.target.classList.contains('modal-overlay')) {
+                e.target.classList.remove('active');
+                document.body.style.overflow = '';
+            }
+
+            // Close notifications dropdown when clicking outside
+            const dropdown = document.getElementById('notificationsDropdown');
+            if (dropdown && !dropdown.classList.contains('hidden')) {
+                if (!e.target.closest('.notification-bell') && !e.target.closest('#notificationsDropdown')) {
+                    dropdown.classList.add('hidden');
+                }
             }
         });
 
-        // Context menu / long-press on messages
-        const chatMessages = document.getElementById('chat-messages');
-        if (chatMessages) {
-            chatMessages.addEventListener('contextmenu', e => {
-                const msgEl = e.target.closest('[data-message-id]');
-                if (msgEl) {
-                    e.preventDefault();
-                    this.showContextMenu(e, msgEl.dataset.messageId);
+        // ---- Mobile tab clicks ----
+        document.querySelectorAll('.mobile-tab').forEach(tab => {
+            tab.addEventListener('click', (e) => {
+                e.preventDefault();
+                const view = tab.dataset.view;
+                if (view) {
+                    document.querySelectorAll('.mobile-tab').forEach(t => t.classList.remove('active'));
+                    tab.classList.add('active');
+                    if (view === 'groups') {
+                        this.goBack();
+                    } else {
+                        this.showView(view + 'View');
+                    }
                 }
             });
-            chatMessages.addEventListener('touchstart', e => {
-                const msgEl = e.target.closest('[data-message-id]');
-                if (msgEl) {
-                    this.longPressTimer = setTimeout(() => {
-                        const touch = e.touches[0];
-                        this.showContextMenu({ clientX: touch.clientX, clientY: touch.clientY }, msgEl.dataset.messageId);
-                    }, 600);
-                }
-            }, { passive: true });
-            chatMessages.addEventListener('touchend', () => {
-                if (this.longPressTimer) {
-                    clearTimeout(this.longPressTimer);
-                    this.longPressTimer = null;
-                }
-            });
-            chatMessages.addEventListener('touchmove', () => {
-                if (this.longPressTimer) {
-                    clearTimeout(this.longPressTimer);
-                    this.longPressTimer = null;
-                }
-            });
+        });
 
-            // Infinite scroll (load older messages)
-            chatMessages.addEventListener('scroll', () => {
-                if (chatMessages.scrollTop < 100 && !this.state.loadingMore && this.state.messages.length > 0) {
+        // ---- Group section toggle (Autre) ----
+        document.addEventListener('click', (e) => {
+            const toggle = e.target.closest('.group-section-toggle');
+            if (toggle) {
+                this.toggleOtherGroups();
+            }
+        });
+
+        // ---- Messages container scroll (infinite scroll) ----
+        const messagesContainer = document.getElementById('messagesContainer');
+        if (messagesContainer) {
+            messagesContainer.addEventListener('scroll', () => {
+                if (messagesContainer.scrollTop < 100 && !this.state.loadingOlder) {
                     this.loadOlderMessages();
                 }
             });
-        }
 
-        // Bottom tab navigation
-        const bottomNav = document.getElementById('bottom-nav');
-        if (bottomNav) {
-            bottomNav.addEventListener('click', e => {
-                const tab = e.target.closest('[data-view]');
-                if (tab) {
-                    this.showView(tab.dataset.view);
-                    bottomNav.querySelectorAll('[data-view]').forEach(t => t.classList.remove('active'));
-                    tab.classList.add('active');
+            // Touch events for long press on messages
+            messagesContainer.addEventListener('touchstart', (e) => {
+                const msgEl = e.target.closest('.message');
+                if (msgEl) {
+                    this.state.touchStartY = e.touches[0].clientY;
+                    this.state.touchStartX = e.touches[0].clientX;
+                    this.state.longPressTimer = setTimeout(() => {
+                        const msgId = parseInt(msgEl.dataset.msgId);
+                        if (msgId) this.showMessageContextMenu(msgId, e.touches[0].clientX, e.touches[0].clientY);
+                    }, 600);
+                }
+            });
+
+            messagesContainer.addEventListener('touchmove', () => {
+                if (this.state.longPressTimer) {
+                    clearTimeout(this.state.longPressTimer);
+                    this.state.longPressTimer = null;
+                }
+            });
+
+            messagesContainer.addEventListener('touchend', () => {
+                if (this.state.longPressTimer) {
+                    clearTimeout(this.state.longPressTimer);
+                    this.state.longPressTimer = null;
                 }
             });
         }
 
-        // Sidebar nav links
-        document.querySelectorAll('[data-nav-view]').forEach(link => {
-            link.addEventListener('click', e => {
-                e.preventDefault();
-                this.showView(link.dataset.navView);
-            });
-        });
-
-        // Profile edit form
-        const profileForm = document.getElementById('profile-form');
-        if (profileForm) {
-            profileForm.addEventListener('submit', e => {
-                e.preventDefault();
-                const formData = new FormData(profileForm);
-                const data = {};
-                formData.forEach((val, key) => { data[key] = val; });
-                this.updateProfile(data);
-            });
-        }
-
-        // Profile photo upload
-        const profilePhotoInput = document.getElementById('profile-photo-input');
-        if (profilePhotoInput) {
-            profilePhotoInput.addEventListener('change', e => {
-                if (e.target.files[0]) {
-                    this.uploadProfilePhoto(e.target.files[0]);
+        // ---- Image viewer close ----
+        const imageViewer = document.getElementById('imageViewer');
+        if (imageViewer) {
+            imageViewer.addEventListener('click', (e) => {
+                if (e.target === imageViewer || e.target.classList.contains('viewer-close')) {
+                    this.closeImageViewer();
                 }
             });
         }
 
-        // Admin action buttons (delegation)
-        const adminPanel = document.getElementById('admin-panel');
-        if (adminPanel) {
-            adminPanel.addEventListener('click', e => {
-                const btn = e.target.closest('[data-admin-action]');
-                if (!btn) return;
-                const action = btn.dataset.adminAction;
-                const id = parseInt(btn.dataset.id, 10);
-                switch (action) {
-                    case 'approve': this.approveMember(id); break;
-                    case 'reject': this.rejectMember(id); break;
-                    case 'suspend': this.suspendMember(id); break;
-                    case 'dismiss-report': this.handleReport(id, 'dismiss'); break;
-                    case 'warn-report': this.handleReport(id, 'warn'); break;
-                    case 'ban-report': this.handleReport(id, 'ban'); break;
-                }
-                const roleSelect = btn.closest('.admin-member-row')?.querySelector('[data-role-select]');
-                if (action === 'change-role' && roleSelect) {
-                    this.changeRole(id, roleSelect.value);
-                }
-            });
-        }
-
-        // Autre section expand/collapse
-        document.addEventListener('click', e => {
-            if (e.target.closest('.autre-toggle')) {
-                this.state.autreExpanded = !this.state.autreExpanded;
-                const autreList = document.getElementById('autre-groups');
-                const toggleIcon = e.target.closest('.autre-toggle').querySelector('.toggle-icon');
-                if (autreList) {
-                    autreList.style.display = this.state.autreExpanded ? 'block' : 'none';
-                }
-                if (toggleIcon) {
-                    toggleIcon.textContent = this.state.autreExpanded ? '▲' : '▼';
-                }
-            }
-        });
-
-        // PWA install prompt
-        window.addEventListener('beforeinstallprompt', e => {
-            e.preventDefault();
-            this.state.pwaInstallPrompt = e;
-            const installBtn = document.getElementById('pwa-install-btn');
-            if (installBtn) {
-                installBtn.style.display = 'block';
-                installBtn.addEventListener('click', () => {
-                    this.state.pwaInstallPrompt.prompt();
-                    this.state.pwaInstallPrompt.userChoice.then(choice => {
-                        if (choice.outcome === 'accepted') {
-                            installBtn.style.display = 'none';
-                        }
-                        this.state.pwaInstallPrompt = null;
-                    });
-                });
-            }
-        });
-
-        // Close context menu on click elsewhere
-        document.addEventListener('click', e => {
-            if (!e.target.closest('.context-menu')) {
-                const existing = document.querySelector('.context-menu');
-                if (existing) existing.remove();
-            }
-        });
-
-        // Mention dropdown click
-        document.addEventListener('click', e => {
-            const mentionItem = e.target.closest('.mention-item');
-            if (mentionItem) {
-                this.insertMention(mentionItem.dataset.username, mentionItem.dataset.displayName);
-            }
-        });
-
-        // Logout button
-        const logoutBtn = document.getElementById('logout-btn');
-        if (logoutBtn) {
-            logoutBtn.addEventListener('click', e => {
-                e.preventDefault();
-                this.logout();
-            });
-        }
-
-        // Back button (mobile chat -> sidebar)
-        const backBtn = document.getElementById('back-to-sidebar');
-        if (backBtn) {
-            backBtn.addEventListener('click', () => {
-                document.getElementById('sidebar')?.classList.remove('hidden');
-                document.getElementById('chat-panel')?.classList.add('hidden');
-            });
-        }
-
-        // Notification bell
-        const notifBtn = document.getElementById('notification-btn');
-        if (notifBtn) {
-            notifBtn.addEventListener('click', () => {
-                this.showModal('notifications-modal');
-                this.loadNotifications();
-            });
-        }
-
-        // Show login/register toggle links
-        document.addEventListener('click', e => {
-            if (e.target.id === 'show-register') {
-                e.preventDefault();
-                document.getElementById('login-view')?.classList.add('hidden');
-                document.getElementById('register-view')?.classList.remove('hidden');
-            }
-            if (e.target.id === 'show-login') {
-                e.preventDefault();
-                document.getElementById('register-view')?.classList.add('hidden');
-                document.getElementById('login-view')?.classList.remove('hidden');
-            }
-            if (e.target.id === 'show-forgot') {
-                e.preventDefault();
-                document.getElementById('login-view')?.classList.add('hidden');
-                document.getElementById('forgot-view')?.classList.remove('hidden');
-            }
-            if (e.target.id === 'back-to-login') {
-                e.preventDefault();
-                document.getElementById('forgot-view')?.classList.add('hidden');
-                document.getElementById('login-view')?.classList.remove('hidden');
-            }
-        });
-
-        // Reply cancel
-        document.addEventListener('click', e => {
-            if (e.target.id === 'cancel-reply') {
-                this.state.replyingTo = null;
-                const replyBar = document.getElementById('reply-bar');
-                if (replyBar) replyBar.style.display = 'none';
-            }
-        });
-
-        // Edit cancel
-        document.addEventListener('click', e => {
-            if (e.target.id === 'cancel-edit') {
-                this.state.editingMessageId = null;
-                const composer = document.getElementById('message-composer');
-                if (composer) composer.value = '';
-                const editBar = document.getElementById('edit-bar');
-                if (editBar) editBar.style.display = 'none';
-            }
-        });
-
-        // Window resize
-        window.addEventListener('resize', () => {
-            this.state.isMobile = window.innerWidth <= 768;
-        });
-
-        // Library category filter
-        document.addEventListener('click', e => {
-            const tab = e.target.closest('.library-tab');
-            if (tab) {
-                document.querySelectorAll('.library-tab').forEach(t => t.classList.remove('active'));
-                tab.classList.add('active');
-                this.loadDocuments(tab.dataset.category || '');
-            }
-        });
-
-        // Report form submit
-        const reportForm = document.getElementById('report-form');
+        // ---- Report form ----
+        const reportForm = document.getElementById('reportForm');
         if (reportForm) {
-            reportForm.addEventListener('submit', e => {
+            reportForm.addEventListener('submit', (e) => {
                 e.preventDefault();
-                const reason = document.getElementById('report-reason').value;
-                const comment = document.getElementById('report-comment').value;
-                const messageId = parseInt(reportForm.dataset.messageId, 10);
-                this.reportMessage(messageId, reason, comment);
-                this.hideModal('report-modal');
+                this.submitReport();
             });
         }
 
-        // Push notification request
-        const pushBtn = document.getElementById('enable-push-btn');
-        if (pushBtn) {
-            pushBtn.addEventListener('click', () => this.requestPushPermission());
-        }
-    },
+        // ---- Window click to close context menu ----
+        document.addEventListener('click', (e) => {
+            const contextMenu = document.getElementById('contextMenu');
+            if (contextMenu && !e.target.closest('#contextMenu')) {
+                contextMenu.remove();
+            }
+        });
 
-    registerServiceWorker() {
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register(`${BASE_URL}/sw.js`).catch(() => {
-                // Service worker registration failed silently
-            });
-        }
-    },
-
-    setupPWAInstallPrompt() {
-        window.addEventListener('appinstalled', () => {
-            this.state.pwaInstallPrompt = null;
-            const installBtn = document.getElementById('pwa-install-btn');
-            if (installBtn) installBtn.style.display = 'none';
+        // ---- Visibility change - pause/resume polling ----
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                this.stopPolling();
+            } else {
+                if (this.state.user && this.state.user.role !== 'pending') {
+                    this.startPolling();
+                    if (this.state.currentGroup) {
+                        this.pollUpdates();
+                    }
+                }
+            }
         });
     },
 
-    renderUserInfo() {
-        const user = this.state.currentUser;
-        if (!user) return;
-        const nameEl = document.getElementById('user-display-name');
-        if (nameEl) nameEl.textContent = `${user.first_name} ${user.last_name}`;
-        const avatarEl = document.getElementById('user-avatar');
-        if (avatarEl) {
-            if (user.photo_url) {
-                avatarEl.innerHTML = `<img src="${this.escapeHtml(user.photo_url)}" alt="Avatar" class="avatar-img">`;
-            } else {
-                avatarEl.innerHTML = `<img src="${this.generateInitialsAvatar(user.first_name + ' ' + user.last_name)}" alt="Avatar" class="avatar-img">`;
-            }
-        }
-        // Show admin nav if admin
-        const adminNav = document.getElementById('admin-nav');
-        if (adminNav) {
-            adminNav.style.display = (user.role === 'admin' || user.role === 'superadmin') ? 'block' : 'none';
-        }
+    autoResizeTextarea(textarea) {
+        textarea.style.height = 'auto';
+        const maxHeight = 150;
+        const newHeight = Math.min(textarea.scrollHeight, maxHeight);
+        textarea.style.height = newHeight + 'px';
+        textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden';
     },
 
     // =========================================================================
-    // API WRAPPER
+    // API HELPER
     // =========================================================================
-
     async api(endpoint, options = {}) {
-        const url = `${BASE_URL}/${endpoint}`;
-        const headers = options.headers || {};
+        const url = '/connect/api/' + endpoint;
+        const defaultHeaders = {
+            'X-Requested-With': 'XMLHttpRequest',
+        };
 
-        // Add CSRF token
-        const csrfMeta = document.querySelector('meta[name="csrf-token"]');
-        if (csrfMeta) {
-            headers['X-CSRF-Token'] = csrfMeta.getAttribute('content');
+        if (this.state.csrfToken) {
+            defaultHeaders['X-CSRF-Token'] = this.state.csrfToken;
         }
 
-        // If body is not FormData, set JSON content type
+        const fetchOptions = {
+            credentials: 'same-origin',
+            ...options,
+            headers: {
+                ...defaultHeaders,
+                ...(options.headers || {}),
+            },
+        };
+
         if (options.body && !(options.body instanceof FormData)) {
-            headers['Content-Type'] = 'application/json';
-            if (typeof options.body === 'object') {
-                options.body = JSON.stringify(options.body);
-            }
+            fetchOptions.headers['Content-Type'] = 'application/json';
+            fetchOptions.body = JSON.stringify(options.body);
         }
 
         try {
-            const response = await fetch(url, {
-                ...options,
-                headers,
-                credentials: 'same-origin'
-            });
+            const res = await fetch(url, fetchOptions);
 
-            if (response.status === 401) {
-                this.state.currentUser = null;
-                this.showView('login');
+            if (res.status === 401) {
+                this.state.user = null;
+                this.stopPolling();
+                this.showLanding();
                 return null;
             }
 
-            const data = await response.json();
-
-            if (!response.ok) {
-                const errMsg = data.error || data.message || `Erreur ${response.status}`;
-                this.showToast(errMsg, 'error');
+            if (res.status === 403) {
+                this.showToast('Accès refusé', 'error');
                 return null;
+            }
+
+            if (res.status === 429) {
+                this.showToast('Trop de requêtes. Veuillez patienter.', 'error');
+                return null;
+            }
+
+            const data = await res.json();
+
+            if (!res.ok) {
+                throw new Error(data.error || data.message || 'Erreur serveur');
+            }
+
+            // Update CSRF token if provided
+            if (data.csrf_token) {
+                this.state.csrfToken = data.csrf_token;
             }
 
             return data;
         } catch (err) {
-            this.showToast('Erreur de connexion au serveur', 'error');
-            console.error('API Error:', err);
-            return null;
+            if (err.name === 'TypeError' && err.message.includes('fetch')) {
+                this.showToast('Erreur de connexion réseau', 'error');
+                return null;
+            }
+            throw err;
         }
     },
 
     // =========================================================================
-    // AUTHENTICATION
+    // AUTH
     // =========================================================================
+    async checkAuth() {
+        try {
+            const data = await this.api('auth.php?action=me');
+            if (data && data.user) {
+                this.state.user = data.user;
+                this.state.csrfToken = data.csrf_token || '';
+                if (data.user.role === 'pending') {
+                    this.showWaiting();
+                } else {
+                    this.showApp();
+                }
+            } else {
+                this.showLanding();
+            }
+        } catch (err) {
+            this.showLanding();
+        }
+    },
 
     async login(email, password) {
-        if (!email || !password) {
-            this.showToast('Veuillez remplir tous les champs', 'warning');
-            return;
+        const submitBtn = document.querySelector('#loginForm button[type="submit"]');
+        const errorEl = document.getElementById('loginError');
+
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Connexion...';
         }
-        this.showLoading();
-        const result = await this.api('api/auth.php?action=login', {
-            method: 'POST',
-            body: { email, password }
-        });
-        this.hideLoading();
-        if (result && result.success) {
-            this.state.currentUser = result.user;
-            this.showToast('Connexion réussie', 'success');
-            setTimeout(() => window.location.reload(), 500);
+        if (errorEl) errorEl.textContent = '';
+
+        try {
+            const data = await this.api('auth.php?action=login', {
+                method: 'POST',
+                body: { email, password },
+            });
+
+            if (data && data.user) {
+                this.state.user = data.user;
+                this.state.csrfToken = data.csrf_token || '';
+
+                if (data.user.role === 'pending') {
+                    this.hideModal('loginModal');
+                    this.showWaiting();
+                } else if (data.user.role === 'blocked') {
+                    if (errorEl) errorEl.textContent = 'Votre compte est bloqué. Contactez un administrateur.';
+                } else {
+                    this.hideModal('loginModal');
+                    this.showApp();
+                    this.showToast('Bienvenue, ' + this.escapeHtml(data.user.first_name) + ' !', 'success');
+                }
+            }
+        } catch (err) {
+            const msg = err.message || 'Identifiants incorrects';
+            if (errorEl) errorEl.textContent = msg;
+            else this.showToast(msg, 'error');
+        } finally {
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Se connecter';
+            }
         }
     },
 
     async register(formData) {
-        this.showLoading();
-        const result = await this.api('api/auth.php?action=register', {
-            method: 'POST',
-            body: formData
-        });
-        this.hideLoading();
-        if (result && result.success) {
-            this.showToast('Inscription envoyée ! Votre compte est en attente de validation par un administrateur.', 'success');
-            document.getElementById('register-view')?.classList.add('hidden');
-            document.getElementById('login-view')?.classList.remove('hidden');
-            const pendingNotice = document.getElementById('pending-notice');
-            if (pendingNotice) {
-                pendingNotice.style.display = 'block';
-                pendingNotice.textContent = 'Votre inscription est en attente de validation. Vous recevrez un email une fois approuvé.';
+        const submitBtn = document.querySelector('#registerForm button[type="submit"]');
+        const errorEl = document.getElementById('registerError');
+        const successEl = document.getElementById('registerSuccess');
+
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Inscription...';
+        }
+        if (errorEl) errorEl.textContent = '';
+        if (successEl) successEl.textContent = '';
+
+        try {
+            formData.append('action', 'register');
+            const data = await this.api('auth.php?action=register', {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (data && data.success) {
+                if (successEl) {
+                    successEl.textContent = data.message || 'Inscription réussie ! Votre demande est en cours de validation.';
+                }
+                const form = document.getElementById('registerForm');
+                if (form) form.reset();
+
+                setTimeout(() => {
+                    this.hideModal('registerModal');
+                    this.showToast('Demande d\'inscription envoyée', 'success');
+                }, 2000);
+            }
+        } catch (err) {
+            const msg = err.message || 'Erreur lors de l\'inscription';
+            if (errorEl) errorEl.textContent = msg;
+            else this.showToast(msg, 'error');
+        } finally {
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'S\'inscrire';
             }
         }
     },
 
     async logout() {
-        this.showLoading();
-        await this.api('api/auth.php?action=logout', { method: 'POST' });
-        this.hideLoading();
-        this.stopPolling();
-        this.state.currentUser = null;
-        this.state.groups = [];
+        try {
+            await this.api('auth.php?action=logout', { method: 'POST' });
+        } catch (err) {
+            // Continue with local logout even if API fails
+        }
+        this.state.user = null;
+        this.state.currentGroup = null;
         this.state.messages = [];
-        window.location.reload();
+        this.state.groups = [];
+        this.state.unreadCounts = {};
+        this.state.anonAccepted = false;
+        this.stopPolling();
+        this.showLanding();
+        this.showToast('Déconnexion réussie', 'success');
     },
 
     async forgotPassword(email) {
         if (!email) {
-            this.showToast('Veuillez entrer votre adresse email', 'warning');
+            this.showToast('Veuillez saisir votre adresse email', 'error');
             return;
         }
-        this.showLoading();
-        const result = await this.api('api/auth.php?action=forgot-password', {
-            method: 'POST',
-            body: { email }
-        });
-        this.hideLoading();
-        if (result) {
-            this.showToast('Si cette adresse existe, un lien de réinitialisation a été envoyé.', 'success');
+
+        try {
+            const data = await this.api('auth.php?action=forgot-password', {
+                method: 'POST',
+                body: { email },
+            });
+
+            if (data && data.success) {
+                this.showToast('Un email de réinitialisation a été envoyé', 'success');
+                this.hideModal('forgotPasswordModal');
+            }
+        } catch (err) {
+            this.showToast(err.message || 'Erreur lors de l\'envoi', 'error');
         }
     },
 
-    async checkAuth() {
-        const result = await this.api('api/auth.php?action=me');
-        if (result && result.user) {
-            return result.user;
+    async resetPassword(token, newPassword) {
+        try {
+            const data = await this.api('auth.php?action=reset-password', {
+                method: 'POST',
+                body: { token, password: newPassword },
+            });
+
+            if (data && data.success) {
+                this.showToast('Mot de passe modifié avec succès', 'success');
+                this.showModal('loginModal');
+            }
+        } catch (err) {
+            this.showToast(err.message || 'Erreur lors de la réinitialisation', 'error');
         }
-        return null;
+    },
+
+    async changePassword(currentPassword, newPassword) {
+        try {
+            const data = await this.api('auth.php?action=change-password', {
+                method: 'POST',
+                body: { current_password: currentPassword, new_password: newPassword },
+            });
+
+            if (data && data.success) {
+                this.showToast('Mot de passe modifié avec succès', 'success');
+            }
+        } catch (err) {
+            this.showToast(err.message || 'Erreur lors du changement', 'error');
+        }
+    },
+
+    // =========================================================================
+    // VIEW MANAGEMENT
+    // =========================================================================
+    showLanding() {
+        document.getElementById('landingPage')?.classList.remove('hidden');
+        document.getElementById('appContainer')?.classList.add('hidden');
+        document.getElementById('waitingPage')?.classList.add('hidden');
+    },
+
+    showApp() {
+        document.getElementById('landingPage')?.classList.add('hidden');
+        document.getElementById('appContainer')?.classList.remove('hidden');
+        document.getElementById('waitingPage')?.classList.add('hidden');
+        this.loadGroups();
+        this.startPolling();
+        this.updateUserUI();
+    },
+
+    showWaiting() {
+        document.getElementById('landingPage')?.classList.add('hidden');
+        document.getElementById('appContainer')?.classList.add('hidden');
+        document.getElementById('waitingPage')?.classList.remove('hidden');
+    },
+
+    showView(viewName) {
+        const views = ['chatView', 'libraryView', 'agendaView', 'directoryView', 'adminView', 'profileView'];
+        views.forEach(v => {
+            const el = document.getElementById(v);
+            if (el) el.classList.toggle('hidden', v !== viewName);
+        });
+
+        this.state.currentView = viewName;
+
+        // Update mobile tab active state
+        document.querySelectorAll('.mobile-tab').forEach(tab => {
+            const tabView = tab.dataset.view;
+            if (tabView) {
+                tab.classList.toggle('active', tabView + 'View' === viewName);
+            }
+        });
+
+        // Load data for the selected view
+        switch (viewName) {
+            case 'libraryView':
+                this.loadDocuments();
+                break;
+            case 'agendaView':
+                this.loadEvents();
+                break;
+            case 'directoryView':
+                this.loadMembers();
+                break;
+            case 'adminView':
+                this.loadAdminDashboard();
+                break;
+            case 'profileView':
+                this.renderProfile();
+                break;
+            case 'chatView':
+                if (this.state.currentGroup) {
+                    this.scrollToBottom();
+                }
+                break;
+        }
     },
 
     // =========================================================================
     // GROUPS
     // =========================================================================
-
     async loadGroups() {
-        const result = await this.api('api/groups.php');
-        if (result && result.groups) {
-            this.state.groups = result.groups;
-            if (result.unread_counts) {
-                this.state.unreadCounts = result.unread_counts;
-            }
-            this.renderGroupList();
+        try {
+            const data = await this.api('groups.php?action=list');
+            if (data && data.groups) {
+                this.state.groups = data.groups;
+                this.renderGroupList();
 
-            // Auto-open first group if none selected
-            if (!this.state.currentGroup && this.state.groups.length > 0) {
-                this.openGroup(this.state.groups[0].id);
+                // Auto-open first group if none selected
+                if (!this.state.currentGroup && data.groups.length > 0) {
+                    this.openGroup(data.groups[0].id);
+                }
             }
+        } catch (err) {
+            this.showToast('Erreur de chargement des salons', 'error');
         }
     },
 
     renderGroupList() {
-        const container = document.getElementById('group-list');
+        const container = document.getElementById('groupList');
         if (!container) return;
 
-        const groups = this.state.groups;
-        const generalGroup = groups.find(g => g.slug === 'discussion-generale' || g.name === 'Discussion générale');
-        const otherGroups = groups.filter(g => g !== generalGroup);
+        // Separate general from others
+        const generalGroup = this.state.groups.find(g => g.type === 'general');
+        const otherGroups = this.state.groups.filter(g => g.type !== 'general');
 
         let html = '';
 
-        // Discussion générale at top
+        // Discussion generale at top
         if (generalGroup) {
-            html += this.renderGroupItem(generalGroup, true);
+            html += this.renderGroupItem(generalGroup);
         }
 
-        // Autre section
-        if (otherGroups.length > 0) {
-            html += `
-                <div class="autre-section">
-                    <div class="autre-toggle">
-                        <span class="autre-label">Autre</span>
-                        <span class="toggle-icon">${this.state.autreExpanded ? '▲' : '▼'}</span>
-                    </div>
-                    <div id="autre-groups" style="display: ${this.state.autreExpanded ? 'block' : 'none'}">
-                        ${otherGroups.map(g => this.renderGroupItem(g, false)).join('')}
-                    </div>
-                </div>
-            `;
+        // Specialty/thematic groups (non-general, non-other)
+        const mainGroups = otherGroups.filter(g =>
+            ['announcement', 'clinical_cases', 'scientific'].includes(g.type)
+        );
+        mainGroups.forEach(g => {
+            html += this.renderGroupItem(g);
+        });
+
+        // "Autre" section with collapsible toggle
+        const autreGroups = otherGroups.filter(g =>
+            !['announcement', 'clinical_cases', 'scientific'].includes(g.type)
+        );
+        if (autreGroups.length > 0) {
+            const expanded = this.state.autreExpanded !== false;
+            html += `<div class="group-section-header group-section-toggle" onclick="App.toggleOtherGroups()">
+                <span>Autre</span>
+                <svg class="arrow ${expanded ? '' : 'rotated'}" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="6 9 12 15 18 9"/>
+                </svg>
+            </div>`;
+            html += `<div class="group-section-content" id="otherGroups" ${expanded ? '' : 'style="display:none"'}>`;
+            autreGroups.forEach(g => {
+                html += this.renderGroupItem(g);
+            });
+            html += `</div>`;
         }
 
         container.innerHTML = html;
     },
 
-    renderGroupItem(group, isPrimary) {
-        const unread = this.state.unreadCounts[group.id] || 0;
+    renderGroupItem(group) {
+        const unread = this.state.unreadCounts[group.id] || group.unread_count || 0;
         const isActive = this.state.currentGroup && this.state.currentGroup.id === group.id;
-        const initials = this.getGroupInitials(group.name);
-        const color = this.hashColor(group.name);
-        const lastMsg = group.last_message;
-        const lastMsgPreview = lastMsg ? this.truncate(lastMsg.content || '', 40) : '';
-        const lastMsgTime = lastMsg ? this.timeAgo(new Date(lastMsg.created_at)) : '';
+        const lastMsg = group.last_message || '';
+        const lastTime = group.last_message_time
+            ? this.formatTime(new Date(group.last_message_time))
+            : '';
+        const initials = group.name
+            .split(' ')
+            .map(w => w[0])
+            .join('')
+            .substring(0, 2)
+            .toUpperCase();
 
-        return `
-            <div class="group-item ${isActive ? 'active' : ''} ${isPrimary ? 'group-primary' : ''}" data-group-id="${group.id}">
-                <div class="group-avatar" style="background-color: ${color}">
-                    <span class="group-initials">${this.escapeHtml(initials)}</span>
-                </div>
-                <div class="group-info">
-                    <div class="group-name-row">
-                        <span class="group-name">${this.escapeHtml(group.name)}</span>
-                        <span class="group-time">${lastMsgTime}</span>
-                    </div>
-                    <div class="group-preview-row">
-                        <span class="group-preview">${this.escapeHtml(lastMsgPreview)}</span>
-                        ${unread > 0 ? `<span class="unread-badge">${unread > 99 ? '99+' : unread}</span>` : ''}
-                    </div>
-                </div>
+        const icons = {
+            general: '💬',
+            announcement: '📢',
+            clinical_cases: '🔬',
+            scientific: '🧪',
+            library: '📚',
+            agenda: '📅',
+        };
+        const icon = icons[group.type] || '💬';
+
+        return `<div class="group-item ${isActive ? 'active' : ''}" onclick="App.openGroup(${group.id})" data-group-id="${group.id}">
+            <div class="group-avatar" title="${this.escapeHtml(group.name)}">${icon}</div>
+            <div class="group-info">
+                <div class="group-name">${this.escapeHtml(group.name)}</div>
+                <div class="group-preview">${this.escapeHtml(this.truncate(lastMsg, 45))}</div>
             </div>
-        `;
+            <div class="group-meta">
+                <span class="group-time">${lastTime}</span>
+                ${unread > 0 ? `<span class="group-badge">${unread > 99 ? '99+' : unread}</span>` : ''}
+            </div>
+        </div>`;
     },
 
-    getGroupInitials(name) {
-        const words = name.split(/\s+/).filter(Boolean);
-        if (words.length >= 2) {
-            return (words[0][0] + words[1][0]).toUpperCase();
+    toggleOtherGroups() {
+        const el = document.getElementById('otherGroups');
+        const arrow = document.querySelector('.group-section-toggle .arrow');
+        if (el) {
+            const isHidden = el.style.display === 'none';
+            el.style.display = isHidden ? '' : 'none';
+            this.state.autreExpanded = isHidden;
         }
-        return name.substring(0, 2).toUpperCase();
+        if (arrow) {
+            arrow.classList.toggle('rotated');
+        }
     },
-
-    truncate(str, len) {
-        if (str.length <= len) return str;
-        return str.substring(0, len) + '…';
-    },
-
-    // =========================================================================
-    // OPEN GROUP
-    // =========================================================================
 
     async openGroup(groupId) {
         const group = this.state.groups.find(g => g.id === groupId);
@@ -704,2220 +829,2644 @@ const NadarConnect = {
 
         this.state.currentGroup = group;
         this.state.messages = [];
-        this.state.lastMessageId = null;
-        this.state.replyingTo = null;
-        this.state.editingMessageId = null;
+        this.state.replyTo = null;
+        this.state.editingMessage = null;
         this.state.attachments = [];
+        this.state.anonAccepted = false;
+        this.clearAttachments();
+        this.clearReply();
 
-        // Update UI header
-        const chatHeader = document.getElementById('chat-header-name');
-        if (chatHeader) chatHeader.textContent = group.name;
+        // Show chat view
+        this.showView('chatView');
 
-        const chatHeaderDesc = document.getElementById('chat-header-description');
-        if (chatHeaderDesc) chatHeaderDesc.textContent = group.description || '';
+        // Update chat header
+        const chatName = document.getElementById('chatName');
+        if (chatName) chatName.textContent = group.name;
 
-        const membersCount = document.getElementById('chat-members-count');
-        if (membersCount) membersCount.textContent = group.member_count ? `${group.member_count} membres` : '';
+        const chatMembers = document.getElementById('chatMembers');
+        if (chatMembers) {
+            chatMembers.textContent = group.member_count
+                ? `${group.member_count} membres`
+                : '';
+        }
 
-        // Clear reply/edit bars
-        const replyBar = document.getElementById('reply-bar');
-        if (replyBar) replyBar.style.display = 'none';
-        const editBar = document.getElementById('edit-bar');
-        if (editBar) editBar.style.display = 'none';
-        const composer = document.getElementById('message-composer');
-        if (composer) composer.value = '';
+        // Show loading
+        const container = document.getElementById('messagesContainer');
+        if (container) {
+            container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+        }
 
-        // Update active state
-        this.renderGroupList();
+        // Highlight active group in sidebar
+        document.querySelectorAll('.group-item').forEach(el => {
+            el.classList.toggle('active', parseInt(el.dataset.groupId) === groupId);
+        });
 
-        // Mobile: show chat panel, hide sidebar
+        // Mobile: hide sidebar, show main
         if (this.state.isMobile) {
             document.getElementById('sidebar')?.classList.add('hidden');
-            document.getElementById('chat-panel')?.classList.remove('hidden');
+            document.getElementById('mainContent')?.classList.remove('hidden');
         }
 
         // Load messages
         await this.loadMessages(groupId);
+
+        // Mark as read
         this.markAsRead(groupId);
 
-        // Check if clinical cases group -> show anonymization notice
-        if (group.slug === 'cas-cliniques' || group.name.toLowerCase().includes('cas clinique')) {
-            this.showAnonymizationConfirmation();
+        // Focus composer
+        const composerInput = document.getElementById('composerInput');
+        if (composerInput && !this.state.isMobile) {
+            composerInput.focus();
+        }
+    },
+
+    async createGroup(name, type, description) {
+        if (!this.isAdmin()) {
+            this.showToast('Seuls les administrateurs peuvent créer des salons', 'error');
+            return;
+        }
+
+        try {
+            const data = await this.api('groups.php?action=create', {
+                method: 'POST',
+                body: { name, type, description },
+            });
+            if (data && data.group) {
+                this.state.groups.push(data.group);
+                this.renderGroupList();
+                this.showToast('Salon créé avec succès', 'success');
+                this.openGroup(data.group.id);
+            }
+        } catch (err) {
+            this.showToast(err.message, 'error');
         }
     },
 
     // =========================================================================
     // MESSAGES
     // =========================================================================
-
     async loadMessages(groupId, before = null) {
-        let endpoint = `api/messages.php?group_id=${groupId}`;
-        if (before) endpoint += `&before=${before}`;
+        let url = `messages.php?action=list&group_id=${groupId}&limit=50`;
+        if (before) url += `&before=${before}`;
 
-        const result = await this.api(endpoint);
-        if (result && result.messages) {
+        try {
+            const data = await this.api(url);
+            if (!data || !data.messages) return;
+
             if (before) {
-                this.state.messages = [...result.messages, ...this.state.messages];
-                this.renderMessages(result.messages, true);
+                // Prepend older messages
+                this.state.messages = [...data.messages, ...this.state.messages];
+                this.renderMessages(data.messages, true);
             } else {
-                this.state.messages = result.messages;
-                this.renderMessages(result.messages, false);
+                this.state.messages = data.messages;
+                this.renderMessages(data.messages, false);
             }
-            if (this.state.messages.length > 0) {
-                this.state.lastMessageId = this.state.messages[this.state.messages.length - 1].id;
+
+            if (data.messages.length > 0) {
+                this.state.lastMessageIds[groupId] =
+                    data.messages[data.messages.length - 1].id;
             }
-            return result.messages;
-        }
-        return [];
-    },
-
-    renderMessages(messages, append) {
-        const container = document.getElementById('chat-messages');
-        if (!container) return;
-
-        if (!append) {
-            container.innerHTML = '';
-        }
-
-        const fragment = document.createDocumentFragment();
-        let lastDate = null;
-
-        const allMessages = append ? messages : this.state.messages;
-        const startIndex = append && this.state.messages.length > messages.length
-            ? 0
-            : 0;
-
-        if (!append) {
-            // Render all messages with date separators
-            allMessages.forEach(msg => {
-                const msgDate = this.formatDate(new Date(msg.created_at));
-                if (msgDate !== lastDate) {
-                    lastDate = msgDate;
-                    const dateSep = document.createElement('div');
-                    dateSep.className = 'date-separator';
-                    dateSep.innerHTML = `<span>${msgDate}</span>`;
-                    fragment.appendChild(dateSep);
-                }
-                const msgEl = document.createElement('div');
-                msgEl.innerHTML = this.renderMessageBubble(msg);
-                fragment.appendChild(msgEl.firstElementChild);
-            });
-            container.appendChild(fragment);
-            container.scrollTop = container.scrollHeight;
-        } else {
-            // Prepend older messages
-            const prevHeight = container.scrollHeight;
-            messages.forEach(msg => {
-                const msgDate = this.formatDate(new Date(msg.created_at));
-                if (msgDate !== lastDate) {
-                    lastDate = msgDate;
-                    const dateSep = document.createElement('div');
-                    dateSep.className = 'date-separator';
-                    dateSep.innerHTML = `<span>${msgDate}</span>`;
-                    fragment.appendChild(dateSep);
-                }
-                const msgEl = document.createElement('div');
-                msgEl.innerHTML = this.renderMessageBubble(msg);
-                fragment.appendChild(msgEl.firstElementChild);
-            });
-            container.insertBefore(fragment, container.firstChild);
-            container.scrollTop = container.scrollHeight - prevHeight;
+        } catch (err) {
+            const container = document.getElementById('messagesContainer');
+            if (container) {
+                container.innerHTML =
+                    '<div class="empty-state"><p>Erreur de chargement des messages</p></div>';
+            }
         }
     },
 
-    appendNewMessages(messages) {
-        const container = document.getElementById('chat-messages');
-        if (!container) return;
-        const wasAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+    async loadOlderMessages() {
+        if (this.state.loadingOlder || !this.state.currentGroup) return;
+        if (this.state.messages.length === 0) return;
 
-        const fragment = document.createDocumentFragment();
-        messages.forEach(msg => {
-            const msgEl = document.createElement('div');
-            msgEl.innerHTML = this.renderMessageBubble(msg);
-            fragment.appendChild(msgEl.firstElementChild);
+        this.state.loadingOlder = true;
+        const oldestId = this.state.messages[0]?.id;
+
+        if (oldestId) {
+            await this.loadMessages(this.state.currentGroup.id, oldestId);
+        }
+
+        this.state.loadingOlder = false;
+    },
+
+    renderMessages(messages, prepend = false) {
+        const container = document.getElementById('messagesContainer');
+        if (!container) return;
+
+        if (messages.length === 0 && !prepend) {
+            container.innerHTML =
+                '<div class="empty-state"><p>Aucun message pour le moment</p><p>Soyez le premier à écrire !</p></div>';
+            return;
+        }
+
+        // Group messages by date
+        let html = '';
+        let lastDate = prepend ? null : '';
+        let lastAuthor = null;
+
+        messages.forEach((msg, idx) => {
+            const msgDate = new Date(msg.created_at);
+            const dateStr = this.formatDate(msgDate);
+
+            // Date separator
+            if (dateStr !== lastDate) {
+                html += `<div class="date-separator"><span>${dateStr}</span></div>`;
+                lastDate = dateStr;
+                lastAuthor = null;
+            }
+
+            // Group consecutive messages from same author
+            const isConsecutive = lastAuthor === msg.user_id &&
+                idx > 0 &&
+                (new Date(msg.created_at) - new Date(messages[idx - 1]?.created_at)) < 120000;
+
+            html += this.renderMessageBubble(msg, isConsecutive);
+            lastAuthor = msg.user_id;
         });
-        container.appendChild(fragment);
 
-        if (wasAtBottom) {
-            container.scrollTop = container.scrollHeight;
-        }
-    },
-
-    async sendMessage(groupId, content, attachments = []) {
-        if (!content && attachments.length === 0) return;
-
-        const replyTo = this.state.replyingTo;
-
-        if (attachments.length > 0) {
-            const formData = new FormData();
-            formData.append('group_id', groupId);
-            if (content) formData.append('content', content);
-            if (replyTo) formData.append('reply_to', replyTo);
-            attachments.forEach((file, i) => {
-                formData.append(`files[${i}]`, file);
-            });
-            // Optimistic message
-            const optimisticMsg = this.createOptimisticMessage(content, attachments);
-            this.state.messages.push(optimisticMsg);
-            this.appendNewMessages([optimisticMsg]);
-
-            const result = await this.api('api/messages.php', {
-                method: 'POST',
-                body: formData
-            });
-            if (result && result.message) {
-                // Replace optimistic message
-                const idx = this.state.messages.findIndex(m => m.id === optimisticMsg.id);
-                if (idx !== -1) {
-                    this.state.messages[idx] = result.message;
-                }
-                this.state.lastMessageId = result.message.id;
-                this.refreshChatUI();
-            }
+        if (prepend) {
+            const scrollHeight = container.scrollHeight;
+            const scrollTop = container.scrollTop;
+            container.insertAdjacentHTML('afterbegin', html);
+            // Maintain scroll position
+            container.scrollTop = scrollTop + (container.scrollHeight - scrollHeight);
         } else {
-            const body = { group_id: groupId, content };
-            if (replyTo) body.reply_to = replyTo;
+            container.innerHTML = html;
+            this.scrollToBottom();
+        }
+    },
 
-            const optimisticMsg = this.createOptimisticMessage(content, []);
-            this.state.messages.push(optimisticMsg);
-            this.appendNewMessages([optimisticMsg]);
+    renderMessageBubble(msg, isConsecutive = false) {
+        const isSent = this.state.user && msg.user_id === this.state.user.id;
+        const sideClass = isSent ? 'sent' : 'received';
+        const pinnedClass = msg.is_pinned ? 'message-pinned' : '';
+        const consecutiveClass = isConsecutive ? 'consecutive' : '';
 
-            const result = await this.api('api/messages.php', {
-                method: 'POST',
-                body
-            });
-            if (result && result.message) {
-                const idx = this.state.messages.findIndex(m => m.id === optimisticMsg.id);
-                if (idx !== -1) {
-                    this.state.messages[idx] = result.message;
-                }
-                this.state.lastMessageId = result.message.id;
-                this.refreshChatUI();
+        // Status icons for sent messages
+        let statusHtml = '';
+        if (isSent) {
+            if (msg.read_count > 0) {
+                statusHtml = '<span class="message-status read" title="Lu">✓✓</span>';
+            } else if (msg.delivered_count > 0) {
+                statusHtml = '<span class="message-status delivered" title="Reçu">✓✓</span>';
+            } else {
+                statusHtml = '<span class="message-status" title="Envoyé">✓</span>';
             }
         }
 
-        // Clear reply state
-        this.state.replyingTo = null;
-        const replyBar = document.getElementById('reply-bar');
-        if (replyBar) replyBar.style.display = 'none';
-        this.state.attachments = [];
+        // Reply quote
+        let replyHtml = '';
+        if (msg.parent_message) {
+            const parentContent = msg.parent_message.content || '';
+            const parentAuthor = msg.parent_message.author || msg.parent_message.author_name || '';
+            replyHtml = `<div class="message-reply" onclick="App.scrollToMessage(${msg.parent_message_id})">
+                <div class="message-reply-author">${this.escapeHtml(parentAuthor)}</div>
+                <div class="message-reply-text">${this.escapeHtml(this.truncate(parentContent, 100))}</div>
+            </div>`;
+        }
+
+        // Attachments
+        let attachHtml = '';
+        if (msg.attachments && msg.attachments.length > 0) {
+            attachHtml += '<div class="message-attachments">';
+            msg.attachments.forEach(att => {
+                if (att.file_type === 'image' || (att.mime_type && att.mime_type.startsWith('image/'))) {
+                    const src = att.file_path.startsWith('http') ? att.file_path : '/connect/' + att.file_path;
+                    attachHtml += `<div class="message-image-wrapper">
+                        <img class="message-image" src="${this.escapeHtml(src)}" alt="${this.escapeHtml(att.file_name || '')}" onclick="App.openImageViewer('${this.escapeHtml(src)}')" loading="lazy">
+                        ${att.caption ? `<div class="message-caption">${this.escapeHtml(att.caption)}</div>` : ''}
+                    </div>`;
+                } else if (att.file_type === 'video' || (att.mime_type && att.mime_type.startsWith('video/'))) {
+                    const src = att.file_path.startsWith('http') ? att.file_path : '/connect/' + att.file_path;
+                    attachHtml += `<div class="message-video-wrapper">
+                        <video class="message-video" controls preload="metadata" style="max-width:300px;border-radius:6px">
+                            <source src="${this.escapeHtml(src)}" type="${this.escapeHtml(att.mime_type || 'video/mp4')}">
+                        </video>
+                    </div>`;
+                } else {
+                    const src = att.file_path.startsWith('http') ? att.file_path : '/connect/' + att.file_path;
+                    const fileIcon = this.getFileIcon(att.mime_type);
+                    attachHtml += `<div class="message-file" onclick="App.downloadFile('${this.escapeHtml(src)}', '${this.escapeHtml(att.file_name || 'fichier')}')">
+                        <div class="message-file-icon">${fileIcon}</div>
+                        <div class="message-file-info">
+                            <div class="message-file-name">${this.escapeHtml(att.file_name || 'Fichier')}</div>
+                            <div class="message-file-size">${this.formatFileSize(att.file_size)}</div>
+                        </div>
+                        <div class="message-file-download">⬇</div>
+                    </div>`;
+                }
+            });
+            attachHtml += '</div>';
+        }
+
+        // Author name for received messages (skip if consecutive)
+        let authorHtml = '';
+        if (!isSent && !isConsecutive) {
+            const authorColor = this.getAuthorColor(msg.user_id);
+            authorHtml = `<div class="message-author" style="color:${authorColor}">${this.escapeHtml(msg.author_name || '')}</div>`;
+        }
+
+        // Content with link detection
+        const content = msg.content ? this.linkify(this.escapeHtml(msg.content)) : '';
+
+        // Pinned indicator
+        const pinnedIndicator = msg.is_pinned
+            ? '<div class="pinned-indicator">📌 Message épinglé</div>'
+            : '';
+
+        // Message actions (hover/tap menu)
+        let actionsHtml = '<div class="message-actions">';
+        actionsHtml += `<button onclick="App.replyToMessage(${msg.id})" title="Répondre">↩</button>`;
+        if (isSent) {
+            actionsHtml += `<button onclick="App.editMessage(${msg.id})" title="Modifier">✎</button>`;
+        }
+        if (isSent || this.isAdmin()) {
+            actionsHtml += `<button onclick="App.deleteMessage(${msg.id})" title="Supprimer">🗑</button>`;
+        }
+        if (!isSent) {
+            actionsHtml += `<button onclick="App.showReportModal(${msg.id})" title="Signaler">⚑</button>`;
+        }
+        if (this.isAdmin()) {
+            const pinLabel = msg.is_pinned ? 'Désépingler' : 'Épingler';
+            const pinAction = msg.is_pinned ? 'unpinMessage' : 'pinMessage';
+            actionsHtml += `<button onclick="App.${pinAction}(${msg.id})" title="${pinLabel}">📌</button>`;
+        }
+        actionsHtml += `<button onclick="App.forwardMessage(${msg.id})" title="Transférer">➡</button>`;
+        actionsHtml += `<button onclick="App.showMessageInfo(${msg.id})" title="Info">ℹ</button>`;
+        actionsHtml += '</div>';
+
+        return `<div class="message ${sideClass} ${pinnedClass} ${consecutiveClass}" id="msg-${msg.id}" data-msg-id="${msg.id}">
+            <div class="message-bubble">
+                ${pinnedIndicator}
+                ${authorHtml}
+                ${replyHtml}
+                ${attachHtml}
+                ${content ? `<div class="message-text">${content}</div>` : ''}
+                <div class="message-meta">
+                    ${msg.edited_at ? '<span class="message-edited">modifié</span>' : ''}
+                    <span class="message-time">${this.formatTime(new Date(msg.created_at))}</span>
+                    ${statusHtml}
+                </div>
+                ${actionsHtml}
+            </div>
+        </div>`;
     },
 
-    createOptimisticMessage(content, attachments) {
-        const user = this.state.currentUser;
-        return {
-            id: 'temp-' + Date.now(),
-            content: content || '',
-            sender_id: user.id,
-            sender_name: `${user.first_name} ${user.last_name}`,
-            sender_photo: user.photo_url,
+    async sendMessage() {
+        const input = document.getElementById('composerInput');
+        if (!input) return;
+
+        const content = input.value.trim();
+        if (!content && this.state.attachments.length === 0) return;
+        if (!this.state.currentGroup) return;
+
+        // Check anonymization for clinical cases
+        if (this.state.currentGroup.type === 'clinical_cases' && !this.state.anonAccepted) {
+            this.showAnonymizationConfirmation(() => {
+                this.state.anonAccepted = true;
+                this.sendMessage();
+            });
+            return;
+        }
+
+        // Build FormData
+        const formData = new FormData();
+        formData.append('action', 'create');
+        formData.append('group_id', this.state.currentGroup.id);
+        if (content) formData.append('content', content);
+        if (this.state.replyTo) {
+            formData.append('parent_message_id', this.state.replyTo.id);
+        }
+        if (this.state.csrfToken) {
+            formData.append('csrf_token', this.state.csrfToken);
+        }
+
+        // Add attachments
+        this.state.attachments.forEach((att, i) => {
+            formData.append(`files[${i}]`, att.file);
+            if (att.caption) {
+                formData.append(`captions[${i}]`, att.caption);
+            }
+        });
+
+        // Clear input immediately for responsiveness
+        const savedContent = input.value;
+        const savedReply = this.state.replyTo;
+        const savedAttachments = [...this.state.attachments];
+        input.value = '';
+        input.style.height = 'auto';
+        this.clearAttachments();
+        this.clearReply();
+
+        // Optimistic message
+        const tempId = this.generateTempId();
+        const tempMsg = {
+            id: tempId,
+            user_id: this.state.user.id,
+            author_name: this.state.user.first_name + ' ' + this.state.user.last_name,
+            content: content,
             created_at: new Date().toISOString(),
-            status: 'sending',
-            attachments: attachments.map(f => ({
-                name: f.name,
-                size: f.size,
-                type: f.type,
-                url: f.type.startsWith('image/') ? URL.createObjectURL(f) : null
-            })),
-            reply_to: this.state.replyingTo ? this.state.messages.find(m => m.id === this.state.replyingTo) : null,
-            is_pinned: false,
-            reactions: []
+            attachments: [],
+            parent_message: savedReply ? {
+                author: savedReply.author_name,
+                content: savedReply.content,
+            } : null,
+            parent_message_id: savedReply ? savedReply.id : null,
+            _temp: true,
         };
-    },
+        this.state.messages.push(tempMsg);
+        const container = document.getElementById('messagesContainer');
+        if (container) {
+            // Remove empty state if present
+            const emptyState = container.querySelector('.empty-state');
+            if (emptyState) emptyState.remove();
 
-    refreshChatUI() {
-        this.renderMessages(this.state.messages, false);
-    },
+            container.insertAdjacentHTML('beforeend', this.renderMessageBubble(tempMsg));
+            this.scrollToBottom();
+        }
 
-    async editMessage(messageId, content) {
-        const result = await this.api('api/messages.php', {
-            method: 'PUT',
-            body: { id: messageId, content }
-        });
-        if (result && result.success) {
-            const idx = this.state.messages.findIndex(m => m.id === messageId);
-            if (idx !== -1) {
-                this.state.messages[idx].content = content;
-                this.state.messages[idx].edited = true;
+        try {
+            const data = await this.api('messages.php?action=create', {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (data && data.message) {
+                // Replace temp message with real one
+                const tempIdx = this.state.messages.findIndex(m => m.id === tempId);
+                if (tempIdx > -1) {
+                    this.state.messages[tempIdx] = data.message;
+                }
+                const tempEl = document.getElementById(`msg-${tempId}`);
+                if (tempEl) {
+                    tempEl.outerHTML = this.renderMessageBubble(data.message);
+                }
+                this.scrollToBottom();
             }
-            this.refreshChatUI();
+        } catch (err) {
+            this.showToast('Erreur d\'envoi: ' + err.message, 'error');
+            // Remove temp message
+            this.state.messages = this.state.messages.filter(m => m.id !== tempId);
+            const tempEl = document.getElementById(`msg-${tempId}`);
+            if (tempEl) tempEl.remove();
+            // Restore input
+            input.value = savedContent;
+            this.state.replyTo = savedReply;
+            this.state.attachments = savedAttachments;
+            this.renderAttachmentPreviews();
+            if (savedReply) this.replyToMessage(savedReply.id);
+        }
+    },
+
+    async editMessage(msgId) {
+        const msg = this.state.messages.find(m => m.id === msgId);
+        if (!msg) return;
+
+        // Show inline edit UI
+        const msgEl = document.getElementById(`msg-${msgId}`);
+        if (!msgEl) return;
+
+        const textEl = msgEl.querySelector('.message-text');
+        if (!textEl) return;
+
+        const originalContent = msg.content || '';
+        textEl.innerHTML = `<div class="edit-inline">
+            <textarea class="edit-textarea" id="editInput-${msgId}">${this.escapeHtml(originalContent)}</textarea>
+            <div class="edit-actions">
+                <button class="btn btn-sm btn-primary" onclick="App.saveEdit(${msgId})">Enregistrer</button>
+                <button class="btn btn-sm" onclick="App.cancelEdit(${msgId})">Annuler</button>
+            </div>
+        </div>`;
+
+        const editInput = document.getElementById(`editInput-${msgId}`);
+        if (editInput) {
+            editInput.focus();
+            editInput.setSelectionRange(editInput.value.length, editInput.value.length);
+            this.autoResizeTextarea(editInput);
+
+            editInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    this.saveEdit(msgId);
+                }
+                if (e.key === 'Escape') {
+                    this.cancelEdit(msgId);
+                }
+            });
+        }
+
+        this.state.editingMessage = msgId;
+    },
+
+    async saveEdit(msgId) {
+        const editInput = document.getElementById(`editInput-${msgId}`);
+        if (!editInput) return;
+
+        const newContent = editInput.value.trim();
+        const msg = this.state.messages.find(m => m.id === msgId);
+        if (!msg) return;
+
+        if (!newContent) {
+            this.showToast('Le message ne peut pas être vide', 'error');
+            return;
+        }
+
+        if (newContent === msg.content) {
+            this.cancelEdit(msgId);
+            return;
+        }
+
+        try {
+            await this.api('messages.php?action=edit', {
+                method: 'POST',
+                body: { message_id: msgId, content: newContent },
+            });
+            msg.content = newContent;
+            msg.edited_at = new Date().toISOString();
+            const el = document.getElementById(`msg-${msgId}`);
+            if (el) el.outerHTML = this.renderMessageBubble(msg);
+            this.state.editingMessage = null;
             this.showToast('Message modifié', 'success');
-        }
-        this.state.editingMessageId = null;
-        const editBar = document.getElementById('edit-bar');
-        if (editBar) editBar.style.display = 'none';
-    },
-
-    async deleteMessage(messageId) {
-        if (!confirm('Êtes-vous sûr de vouloir supprimer ce message ?')) return;
-        const result = await this.api(`api/messages.php?id=${messageId}`, {
-            method: 'DELETE'
-        });
-        if (result && result.success) {
-            this.state.messages = this.state.messages.filter(m => m.id !== messageId);
-            const el = document.querySelector(`[data-message-id="${messageId}"]`);
-            if (el) el.remove();
-            this.showToast('Message supprimé', 'success');
+        } catch (err) {
+            this.showToast(err.message, 'error');
         }
     },
 
-    async reportMessage(messageId, reason, comment) {
-        const result = await this.api('api/messages.php?action=report', {
-            method: 'POST',
-            body: { message_id: messageId, reason, comment }
-        });
-        if (result && result.success) {
-            this.showToast('Signalement envoyé', 'success');
-        }
+    cancelEdit(msgId) {
+        const msg = this.state.messages.find(m => m.id === msgId);
+        if (!msg) return;
+        const el = document.getElementById(`msg-${msgId}`);
+        if (el) el.outerHTML = this.renderMessageBubble(msg);
+        this.state.editingMessage = null;
     },
 
-    async pinMessage(messageId) {
-        const result = await this.api('api/messages.php?action=pin', {
-            method: 'POST',
-            body: { message_id: messageId }
-        });
-        if (result && result.success) {
-            const idx = this.state.messages.findIndex(m => m.id === messageId);
-            if (idx !== -1) {
-                this.state.messages[idx].is_pinned = !this.state.messages[idx].is_pinned;
+    async deleteMessage(msgId) {
+        if (!confirm('Supprimer ce message ?')) return;
+
+        try {
+            await this.api('messages.php?action=delete', {
+                method: 'POST',
+                body: { message_id: msgId },
+            });
+            this.state.messages = this.state.messages.filter(m => m.id !== msgId);
+            const el = document.getElementById(`msg-${msgId}`);
+            if (el) {
+                el.classList.add('message-removing');
+                setTimeout(() => el.remove(), 300);
             }
-            this.refreshChatUI();
+            this.showToast('Message supprimé', 'success');
+        } catch (err) {
+            this.showToast(err.message, 'error');
+        }
+    },
+
+    async pinMessage(msgId) {
+        try {
+            await this.api('messages.php?action=pin', {
+                method: 'POST',
+                body: { message_id: msgId },
+            });
+            const msg = this.state.messages.find(m => m.id === msgId);
+            if (msg) {
+                msg.is_pinned = true;
+                const el = document.getElementById(`msg-${msgId}`);
+                if (el) el.outerHTML = this.renderMessageBubble(msg);
+            }
             this.showToast('Message épinglé', 'success');
+        } catch (err) {
+            this.showToast(err.message, 'error');
+        }
+    },
+
+    async unpinMessage(msgId) {
+        try {
+            await this.api('messages.php?action=unpin', {
+                method: 'POST',
+                body: { message_id: msgId },
+            });
+            const msg = this.state.messages.find(m => m.id === msgId);
+            if (msg) {
+                msg.is_pinned = false;
+                const el = document.getElementById(`msg-${msgId}`);
+                if (el) el.outerHTML = this.renderMessageBubble(msg);
+            }
+            this.showToast('Message désépinglé', 'success');
+        } catch (err) {
+            this.showToast(err.message, 'error');
         }
     },
 
     async markAsRead(groupId) {
-        await this.api('api/messages.php?action=read', {
-            method: 'POST',
-            body: { group_id: groupId }
-        });
-        this.state.unreadCounts[groupId] = 0;
-        this.renderGroupList();
-    },
-
-    async getMessageInfo(messageId) {
-        const result = await this.api(`api/messages.php?action=info&id=${messageId}`);
-        if (result) {
-            const modal = document.getElementById('message-info-modal');
-            if (!modal) return;
-
-            let html = '<div class="message-info-content"><h3>Informations du message</h3>';
-
-            if (result.delivered_to && result.delivered_to.length > 0) {
-                html += '<h4>Distribué à</h4><ul class="receipt-list">';
-                result.delivered_to.forEach(r => {
-                    html += `<li><span class="receipt-name">${this.escapeHtml(r.name)}</span> <span class="receipt-time">${this.formatTime(new Date(r.delivered_at))}</span></li>`;
-                });
-                html += '</ul>';
-            }
-
-            if (result.read_by && result.read_by.length > 0) {
-                html += '<h4>Lu par</h4><ul class="receipt-list">';
-                result.read_by.forEach(r => {
-                    html += `<li><span class="receipt-name">${this.escapeHtml(r.name)}</span> <span class="receipt-time">${this.formatTime(new Date(r.read_at))}</span></li>`;
-                });
-                html += '</ul>';
-            }
-
-            html += '</div>';
-            const body = modal.querySelector('.modal-body');
-            if (body) body.innerHTML = html;
-            this.showModal('message-info-modal');
+        try {
+            await this.api('messages.php?action=mark-read', {
+                method: 'POST',
+                body: { group_id: groupId },
+            });
+            this.state.unreadCounts[groupId] = 0;
+            this.updateUnreadBadges();
+        } catch (err) {
+            // Silently fail
         }
     },
 
-    renderMessageBubble(msg) {
-        const isOwn = this.state.currentUser && msg.sender_id === this.state.currentUser.id;
-        const isSystem = msg.type === 'system';
+    async showMessageInfo(msgId) {
+        try {
+            const data = await this.api(`messages.php?action=info&message_id=${msgId}`);
+            if (!data) return;
 
-        if (isSystem) {
-            return `
-                <div class="message-bubble message-system" data-message-id="${msg.id}">
-                    <div class="system-message-text">${this.escapeHtml(msg.content)}</div>
+            const modal = document.getElementById('messageInfoModal');
+            const body = modal?.querySelector('.modal-body') || document.getElementById('messageInfoBody');
+            if (!body) return;
+
+            const renderList = (items, timeField) => {
+                if (!items || items.length === 0) return '<p class="text-muted">Aucun</p>';
+                return '<ul class="info-list">' + items.map(r =>
+                    `<li>
+                        <span class="info-name">${this.escapeHtml(r.name || r.first_name + ' ' + r.last_name)}</span>
+                        ${r[timeField] ? `<span class="info-time">${this.formatDateTime(new Date(r[timeField]))}</span>` : ''}
+                    </li>`
+                ).join('') + '</ul>';
+            };
+
+            body.innerHTML = `
+                <div class="info-section">
+                    <h4>✓✓ Lu par (${data.read?.length || 0})</h4>
+                    ${renderList(data.read, 'read_at')}
                 </div>
-            `;
-        }
-
-        const senderName = msg.sender_name || 'Utilisateur';
-        const senderPhoto = msg.sender_photo;
-        const avatarHtml = senderPhoto
-            ? `<img src="${this.escapeHtml(senderPhoto)}" alt="" class="message-avatar">`
-            : `<img src="${this.generateInitialsAvatar(senderName)}" alt="" class="message-avatar">`;
-
-        let contentHtml = '';
-
-        // Reply quote
-        if (msg.reply_to && typeof msg.reply_to === 'object') {
-            contentHtml += `
-                <div class="reply-quote">
-                    <span class="reply-author">${this.escapeHtml(msg.reply_to.sender_name || '')}</span>
-                    <span class="reply-text">${this.escapeHtml(this.truncate(msg.reply_to.content || '', 80))}</span>
+                <div class="info-section">
+                    <h4>✓✓ Reçu par (${data.delivered?.length || 0})</h4>
+                    ${renderList(data.delivered, 'delivered_at')}
                 </div>
-            `;
+                <div class="info-section">
+                    <h4>Non reçu (${data.not_delivered?.length || 0})</h4>
+                    ${renderList(data.not_delivered, null)}
+                </div>`;
+
+            this.showModal('messageInfoModal');
+        } catch (err) {
+            this.showToast(err.message, 'error');
+        }
+    },
+
+    replyToMessage(msgId) {
+        const msg = this.state.messages.find(m => m.id === msgId);
+        if (!msg) return;
+
+        this.state.replyTo = msg;
+        let replyBar = document.getElementById('replyBar');
+        if (!replyBar) {
+            // Create reply bar above composer
+            const composerForm = document.getElementById('composerForm');
+            if (composerForm) {
+                replyBar = document.createElement('div');
+                replyBar.id = 'replyBar';
+                composerForm.parentNode.insertBefore(replyBar, composerForm);
+            }
         }
 
-        // Text content
-        if (msg.content) {
-            const processedContent = this.processMessageContent(msg.content);
-            contentHtml += `<div class="message-text">${processedContent}</div>`;
+        if (replyBar) {
+            replyBar.innerHTML = `<div class="reply-preview">
+                <div class="reply-preview-bar"></div>
+                <div class="reply-preview-content">
+                    <div class="reply-preview-author">${this.escapeHtml(msg.author_name || '')}</div>
+                    <div class="reply-preview-text">${this.escapeHtml(this.truncate(msg.content || '', 80))}</div>
+                </div>
+                <button class="reply-close" onclick="App.clearReply()" title="Annuler la réponse">✕</button>
+            </div>`;
+            replyBar.classList.remove('hidden');
         }
 
-        // Attachments
-        if (msg.attachments && msg.attachments.length > 0) {
-            msg.attachments.forEach(att => {
-                if (att.type && att.type.startsWith('image/')) {
-                    contentHtml += `<div class="message-image"><img src="${this.escapeHtml(att.url)}" alt="${this.escapeHtml(att.name || 'Image')}" class="chat-image" loading="lazy"></div>`;
-                } else {
-                    const icon = this.getFileIcon(att.name || att.type || '');
-                    contentHtml += `
-                        <a href="${this.escapeHtml(att.url)}" class="message-file" download="${this.escapeHtml(att.name || 'fichier')}" target="_blank">
-                            <span class="file-icon">${icon}</span>
-                            <div class="file-info">
-                                <span class="file-name">${this.escapeHtml(att.name || 'Fichier')}</span>
-                                <span class="file-size">${att.size ? this.formatFileSize(att.size) : ''}</span>
-                            </div>
-                        </a>
-                    `;
-                }
+        const composerInput = document.getElementById('composerInput');
+        if (composerInput) composerInput.focus();
+    },
+
+    clearReply() {
+        this.state.replyTo = null;
+        const replyBar = document.getElementById('replyBar');
+        if (replyBar) {
+            replyBar.innerHTML = '';
+            replyBar.classList.add('hidden');
+        }
+    },
+
+    scrollToMessage(msgId) {
+        const el = document.getElementById(`msg-${msgId}`);
+        if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            el.classList.add('highlight');
+            setTimeout(() => el.classList.remove('highlight'), 2000);
+        }
+    },
+
+    scrollToBottom() {
+        const container = document.getElementById('messagesContainer');
+        if (container) {
+            requestAnimationFrame(() => {
+                container.scrollTop = container.scrollHeight;
             });
         }
-
-        // Time and status
-        const time = this.formatTime(new Date(msg.created_at));
-        let statusHtml = '';
-        if (isOwn) {
-            if (msg.status === 'sending') {
-                statusHtml = '<span class="msg-status">⏳</span>';
-            } else if (msg.status === 'sent') {
-                statusHtml = '<span class="msg-status">✓</span>';
-            } else if (msg.status === 'delivered') {
-                statusHtml = '<span class="msg-status">✓✓</span>';
-            } else if (msg.status === 'read') {
-                statusHtml = '<span class="msg-status msg-read">✓✓</span>';
-            } else {
-                statusHtml = '<span class="msg-status">✓</span>';
-            }
-        }
-
-        const editedLabel = msg.edited ? ' <span class="edited-label">modifié</span>' : '';
-        const pinnedLabel = msg.is_pinned ? '<div class="pinned-label">📌 Épinglé</div>' : '';
-
-        return `
-            <div class="message-bubble ${isOwn ? 'message-own' : 'message-other'}" data-message-id="${msg.id}">
-                ${pinnedLabel}
-                ${!isOwn ? `<div class="message-sender-row">${avatarHtml}<span class="sender-name">${this.escapeHtml(senderName)}</span></div>` : ''}
-                <div class="message-content">
-                    ${contentHtml}
-                </div>
-                <div class="message-meta">
-                    <span class="message-time">${time}${editedLabel}</span>
-                    ${statusHtml}
-                </div>
-            </div>
-        `;
     },
 
-    processMessageContent(content) {
-        let safe = this.escapeHtml(content);
+    async forwardMessage(msgId) {
+        const msg = this.state.messages.find(m => m.id === msgId);
+        if (!msg) return;
 
-        // Convert URLs to links
-        safe = safe.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
-
-        // Convert @mentions to styled spans
-        safe = safe.replace(/@(\w+)/g, '<span class="mention">@$1</span>');
-
-        // Convert line breaks
-        safe = safe.replace(/\n/g, '<br>');
-
-        // Bold **text**
-        safe = safe.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-
-        // Italic *text*
-        safe = safe.replace(/\*(.+?)\*/g, '<em>$1</em>');
-
-        return safe;
-    },
-
-    getFileIcon(nameOrType) {
-        const ext = nameOrType.includes('.') ? nameOrType.split('.').pop().toLowerCase() : nameOrType;
-        const icons = {
-            pdf: '📄',
-            doc: '📃', docx: '📃',
-            xls: '📊', xlsx: '📊',
-            ppt: '📊', pptx: '📊',
-            zip: '📁', rar: '📁',
-            mp4: '🎥', avi: '🎥', mov: '🎥',
-            mp3: '🎧', wav: '🎧',
-            txt: '📄',
-            csv: '📊'
-        };
-        return icons[ext] || '📂';
-    },
-
-    handleSendMessage() {
-        const composer = document.getElementById('message-composer');
-        if (!composer || !this.state.currentGroup) return;
-
-        const content = composer.value.trim();
-
-        // Handle edit mode
-        if (this.state.editingMessageId) {
-            if (content) {
-                this.editMessage(this.state.editingMessageId, content);
-            }
-            composer.value = '';
-            this.autoResizeComposer(composer);
+        // Show group selection for forwarding
+        const groups = this.state.groups.filter(g =>
+            !this.state.currentGroup || g.id !== this.state.currentGroup.id
+        );
+        if (groups.length === 0) {
+            this.showToast('Aucun autre salon disponible', 'error');
             return;
         }
 
-        if (!content && this.state.attachments.length === 0) return;
+        let html = '<div class="forward-dialog"><h4>Transférer vers :</h4><div class="forward-list">';
+        groups.forEach(g => {
+            html += `<div class="forward-item" onclick="App.doForwardMessage(${msgId}, ${g.id})">
+                <span>${this.escapeHtml(g.name)}</span>
+            </div>`;
+        });
+        html += '</div></div>';
 
-        this.sendMessage(this.state.currentGroup.id, content, this.state.attachments);
-        composer.value = '';
-        this.state.attachments = [];
-        this.autoResizeComposer(composer);
+        // Use a temporary modal
+        let forwardModal = document.getElementById('forwardModal');
+        if (!forwardModal) {
+            forwardModal = document.createElement('div');
+            forwardModal.id = 'forwardModal';
+            forwardModal.className = 'modal-overlay';
+            forwardModal.innerHTML = `<div class="modal">
+                <div class="modal-header">
+                    <h3>Transférer le message</h3>
+                    <button class="modal-close" onclick="App.hideModal('forwardModal')">✕</button>
+                </div>
+                <div class="modal-body" id="forwardModalBody"></div>
+            </div>`;
+            document.body.appendChild(forwardModal);
+        }
 
-        // Clear attachment preview
-        const preview = document.getElementById('attachment-preview');
-        if (preview) preview.innerHTML = '';
+        document.getElementById('forwardModalBody').innerHTML = html;
+        this.showModal('forwardModal');
     },
 
-    async loadOlderMessages() {
-        if (!this.state.currentGroup || this.state.messages.length === 0) return;
-        this.state.loadingMore = true;
-        const oldestId = this.state.messages[0].id;
-        await this.loadMessages(this.state.currentGroup.id, oldestId);
-        this.state.loadingMore = false;
+    async doForwardMessage(msgId, targetGroupId) {
+        try {
+            await this.api('messages.php?action=forward', {
+                method: 'POST',
+                body: { message_id: msgId, target_group_id: targetGroupId },
+            });
+            this.hideModal('forwardModal');
+            this.showToast('Message transféré', 'success');
+        } catch (err) {
+            this.showToast(err.message, 'error');
+        }
+    },
+
+    showMessageContextMenu(msgId, x, y) {
+        // Remove existing context menu
+        const existing = document.getElementById('contextMenu');
+        if (existing) existing.remove();
+
+        const msg = this.state.messages.find(m => m.id === msgId);
+        if (!msg) return;
+
+        const isSent = this.state.user && msg.user_id === this.state.user.id;
+
+        let menuHtml = '<div id="contextMenu" class="context-menu" style="top:' + y + 'px;left:' + x + 'px">';
+        menuHtml += `<div class="context-item" onclick="App.replyToMessage(${msgId});document.getElementById('contextMenu')?.remove()">↩ Répondre</div>`;
+        menuHtml += `<div class="context-item" onclick="App.forwardMessage(${msgId});document.getElementById('contextMenu')?.remove()">➡ Transférer</div>`;
+        if (msg.content) {
+            menuHtml += `<div class="context-item" onclick="App.copyToClipboard('${this.escapeHtml(msg.content.replace(/'/g, "\\'"))}');document.getElementById('contextMenu')?.remove()">📋 Copier</div>`;
+        }
+        if (isSent) {
+            menuHtml += `<div class="context-item" onclick="App.editMessage(${msgId});document.getElementById('contextMenu')?.remove()">✎ Modifier</div>`;
+            menuHtml += `<div class="context-item danger" onclick="App.deleteMessage(${msgId});document.getElementById('contextMenu')?.remove()">🗑 Supprimer</div>`;
+        } else {
+            menuHtml += `<div class="context-item" onclick="App.showReportModal(${msgId});document.getElementById('contextMenu')?.remove()">⚑ Signaler</div>`;
+        }
+        if (this.isAdmin()) {
+            const pinLabel = msg.is_pinned ? '📌 Désépingler' : '📌 Épingler';
+            const pinAction = msg.is_pinned ? 'unpinMessage' : 'pinMessage';
+            menuHtml += `<div class="context-item" onclick="App.${pinAction}(${msgId});document.getElementById('contextMenu')?.remove()">${pinLabel}</div>`;
+        }
+        menuHtml += `<div class="context-item" onclick="App.showMessageInfo(${msgId});document.getElementById('contextMenu')?.remove()">ℹ Info</div>`;
+        menuHtml += '</div>';
+
+        document.body.insertAdjacentHTML('beforeend', menuHtml);
+
+        // Adjust position if off screen
+        const menu = document.getElementById('contextMenu');
+        if (menu) {
+            const rect = menu.getBoundingClientRect();
+            if (rect.right > window.innerWidth) {
+                menu.style.left = (window.innerWidth - rect.width - 10) + 'px';
+            }
+            if (rect.bottom > window.innerHeight) {
+                menu.style.top = (window.innerHeight - rect.height - 10) + 'px';
+            }
+        }
+    },
+
+    getAuthorColor(userId) {
+        const colors = [
+            '#e17055', '#00b894', '#0984e3', '#6c5ce7',
+            '#fdcb6e', '#e84393', '#00cec9', '#ff7675',
+            '#74b9ff', '#a29bfe', '#55efc4', '#fab1a0',
+        ];
+        return colors[(userId || 0) % colors.length];
+    },
+
+    // =========================================================================
+    // ATTACHMENTS
+    // =========================================================================
+    handleAttachment(files, type) {
+        const maxFiles = 10;
+        if (this.state.attachments.length + files.length > maxFiles) {
+            this.showToast(`Maximum ${maxFiles} fichiers par message`, 'error');
+            return;
+        }
+
+        Array.from(files).forEach(file => {
+            const maxSize = type === 'image' ? 20 * 1024 * 1024 : 100 * 1024 * 1024;
+            if (file.size > maxSize) {
+                this.showToast(
+                    `"${file.name}" est trop volumineux (max ${this.formatFileSize(maxSize)})`,
+                    'error'
+                );
+                return;
+            }
+
+            // Validate file type
+            const allowedImageTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+            const blockedTypes = ['application/x-executable', 'application/x-msdownload'];
+            if (type === 'image' && !allowedImageTypes.includes(file.type)) {
+                this.showToast('Type d\'image non supporté', 'error');
+                return;
+            }
+            if (blockedTypes.includes(file.type)) {
+                this.showToast('Type de fichier non autorisé', 'error');
+                return;
+            }
+
+            this.state.attachments.push({
+                file: file,
+                type: file.type.startsWith('image/') ? 'image' : 'file',
+                caption: '',
+                preview: null,
+            });
+
+            // Generate preview for images
+            if (file.type.startsWith('image/')) {
+                const reader = new FileReader();
+                const idx = this.state.attachments.length - 1;
+                reader.onload = (e) => {
+                    if (this.state.attachments[idx]) {
+                        this.state.attachments[idx].preview = e.target.result;
+                        this.renderAttachmentPreviews();
+                    }
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        this.renderAttachmentPreviews();
+    },
+
+    renderAttachmentPreviews() {
+        const container = document.getElementById('attachmentPreview');
+        if (!container) return;
+
+        if (this.state.attachments.length === 0) {
+            container.classList.add('hidden');
+            container.innerHTML = '';
+            return;
+        }
+
+        container.classList.remove('hidden');
+        container.innerHTML = this.state.attachments
+            .map((att, i) => {
+                if (att.type === 'image' || att.file.type.startsWith('image/')) {
+                    const src = att.preview || URL.createObjectURL(att.file);
+                    return `<div class="attachment-preview" data-index="${i}">
+                        <img src="${src}" alt="${this.escapeHtml(att.file.name)}">
+                        <button class="remove" onclick="App.removeAttachment(${i})" title="Retirer">✕</button>
+                        <input type="text" class="attachment-caption" placeholder="Ajouter une légende..."
+                            value="${this.escapeHtml(att.caption)}"
+                            onchange="App.state.attachments[${i}].caption=this.value">
+                    </div>`;
+                } else {
+                    return `<div class="attachment-file-preview" data-index="${i}">
+                        <div class="message-file-icon">${this.getFileIcon(att.file.type)}</div>
+                        <div class="attachment-file-info">
+                            <div class="attachment-file-name">${this.escapeHtml(att.file.name)}</div>
+                            <div class="attachment-file-size">${this.formatFileSize(att.file.size)}</div>
+                        </div>
+                        <button class="remove" onclick="App.removeAttachment(${i})" title="Retirer">✕</button>
+                    </div>`;
+                }
+            })
+            .join('');
+    },
+
+    removeAttachment(index) {
+        this.state.attachments.splice(index, 1);
+        this.renderAttachmentPreviews();
+    },
+
+    clearAttachments() {
+        this.state.attachments = [];
+        this.renderAttachmentPreviews();
+    },
+
+    // =========================================================================
+    // IMAGE VIEWER
+    // =========================================================================
+    openImageViewer(src) {
+        const viewer = document.getElementById('imageViewer');
+        const img = document.getElementById('viewerImage');
+        if (viewer && img) {
+            img.src = src;
+            img.alt = 'Image en plein écran';
+            viewer.classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+
+            // Keyboard navigation
+            this._viewerKeyHandler = (e) => {
+                if (e.key === 'Escape') this.closeImageViewer();
+            };
+            document.addEventListener('keydown', this._viewerKeyHandler);
+        }
+    },
+
+    closeImageViewer() {
+        const viewer = document.getElementById('imageViewer');
+        if (viewer) {
+            viewer.classList.add('hidden');
+            document.body.style.overflow = '';
+            if (this._viewerKeyHandler) {
+                document.removeEventListener('keydown', this._viewerKeyHandler);
+                this._viewerKeyHandler = null;
+            }
+        }
+    },
+
+    downloadFile(url, filename) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename || 'download';
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => a.remove(), 100);
     },
 
     // =========================================================================
     // POLLING
     // =========================================================================
-
     startPolling() {
         this.stopPolling();
-        this.state.pollingInterval = setInterval(() => {
-            this.pollNewMessages();
-        }, 3000);
+        this.state.polling = setInterval(() => this.pollUpdates(), 3000);
     },
 
     stopPolling() {
-        if (this.state.pollingInterval) {
-            clearInterval(this.state.pollingInterval);
-            this.state.pollingInterval = null;
+        if (this.state.polling) {
+            clearInterval(this.state.polling);
+            this.state.polling = null;
         }
     },
 
-    async pollNewMessages() {
-        // Poll for new messages in current group
-        if (this.state.currentGroup && this.state.lastMessageId) {
-            const result = await this.api(
-                `api/messages.php?action=poll&group_id=${this.state.currentGroup.id}&after=${this.state.lastMessageId}`
-            );
-            if (result && result.messages && result.messages.length > 0) {
-                // Filter out own optimistic messages
-                const newMsgs = result.messages.filter(
-                    m => !this.state.messages.some(existing => existing.id === m.id)
-                );
-                if (newMsgs.length > 0) {
-                    this.state.messages.push(...newMsgs);
-                    this.state.lastMessageId = newMsgs[newMsgs.length - 1].id;
-                    this.appendNewMessages(newMsgs);
-
-                    // Play notification sound for others' messages
-                    const hasOthers = newMsgs.some(m => m.sender_id !== this.state.currentUser.id);
-                    if (hasOthers) {
-                        this.playNotificationSound();
-                    }
-                }
-            }
-        }
-
-        // Poll unread counts for all groups
-        const countsResult = await this.api('api/messages.php?action=unread-counts');
-        if (countsResult && countsResult.counts) {
-            const oldCounts = { ...this.state.unreadCounts };
-            this.state.unreadCounts = countsResult.counts;
-
-            // Check if any new unreads appeared
-            let hasNewUnread = false;
-            for (const gId in countsResult.counts) {
-                if ((countsResult.counts[gId] || 0) > (oldCounts[gId] || 0)) {
-                    hasNewUnread = true;
-                    break;
-                }
-            }
-            if (hasNewUnread) {
-                this.renderGroupList();
-                this.updateTotalUnreadBadge();
-            }
-        }
-    },
-
-    playNotificationSound() {
+    async pollUpdates() {
         try {
-            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            const oscillator = audioCtx.createOscillator();
-            const gainNode = audioCtx.createGain();
-            oscillator.connect(gainNode);
-            gainNode.connect(audioCtx.destination);
-            oscillator.frequency.value = 800;
-            oscillator.type = 'sine';
-            gainNode.gain.value = 0.1;
-            oscillator.start();
-            gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
-            oscillator.stop(audioCtx.currentTime + 0.3);
-        } catch (e) {
-            // Audio not available
+            // Poll unread counts
+            const countData = await this.api('notifications.php?action=unread-counts');
+            if (countData && countData.counts) {
+                const oldCounts = { ...this.state.unreadCounts };
+                this.state.unreadCounts = countData.counts;
+                this.updateUnreadBadges();
+
+                // Detect new unreads in non-current groups for notification
+                for (const [groupId, count] of Object.entries(countData.counts)) {
+                    const gId = parseInt(groupId);
+                    if (this.state.currentGroup && gId === this.state.currentGroup.id) continue;
+                    if (count > (oldCounts[groupId] || 0)) {
+                        // New message in another group - update group list preview
+                        this.refreshGroupPreview(gId);
+                    }
+                }
+            }
+
+            // Poll new messages in current group
+            if (this.state.currentGroup) {
+                const lastId = this.state.messages.length > 0
+                    ? Math.max(...this.state.messages.filter(m => !m._temp).map(m => m.id))
+                    : 0;
+
+                const msgData = await this.api(
+                    `messages.php?action=list&group_id=${this.state.currentGroup.id}&after=${lastId}&limit=50`
+                );
+
+                if (msgData && msgData.messages && msgData.messages.length > 0) {
+                    const container = document.getElementById('messagesContainer');
+                    const isNearBottom = container
+                        ? container.scrollHeight - container.scrollTop - container.clientHeight < 200
+                        : false;
+
+                    msgData.messages.forEach(msg => {
+                        // Skip if we already have this message (or it's our own temp message)
+                        if (this.state.messages.find(m => m.id === msg.id)) return;
+
+                        this.state.messages.push(msg);
+                        if (container) {
+                            // Remove empty state
+                            const emptyState = container.querySelector('.empty-state');
+                            if (emptyState) emptyState.remove();
+
+                            container.insertAdjacentHTML(
+                                'beforeend',
+                                this.renderMessageBubble(msg)
+                            );
+                        }
+                    });
+
+                    // Auto scroll if user was near bottom
+                    if (isNearBottom) {
+                        this.scrollToBottom();
+                    } else if (msgData.messages.length > 0) {
+                        // Show "new messages" indicator
+                        this.showNewMessageIndicator(msgData.messages.length);
+                    }
+
+                    // Mark as read if we're viewing
+                    if (!document.hidden) {
+                        this.markAsRead(this.state.currentGroup.id);
+                    }
+                }
+            }
+        } catch (err) {
+            // Silently fail - polling will retry
         }
     },
 
-    updateTotalUnreadBadge() {
-        const total = this.getUnreadCount();
-        const badge = document.getElementById('total-unread-badge');
-        if (badge) {
-            badge.textContent = total > 0 ? (total > 99 ? '99+' : total) : '';
-            badge.style.display = total > 0 ? 'inline-flex' : 'none';
+    showNewMessageIndicator(count) {
+        let indicator = document.getElementById('newMsgIndicator');
+        if (!indicator) {
+            indicator = document.createElement('div');
+            indicator.id = 'newMsgIndicator';
+            indicator.className = 'new-message-indicator';
+            const container = document.getElementById('messagesContainer');
+            if (container) container.parentNode.appendChild(indicator);
         }
+        indicator.textContent = `↓ ${count} nouveau${count > 1 ? 'x' : ''} message${count > 1 ? 's' : ''}`;
+        indicator.classList.remove('hidden');
+        indicator.onclick = () => {
+            this.scrollToBottom();
+            indicator.classList.add('hidden');
+        };
+    },
+
+    async refreshGroupPreview(groupId) {
+        try {
+            const data = await this.api(`groups.php?action=info&group_id=${groupId}`);
+            if (data && data.group) {
+                const idx = this.state.groups.findIndex(g => g.id === groupId);
+                if (idx > -1) {
+                    this.state.groups[idx] = { ...this.state.groups[idx], ...data.group };
+                    this.renderGroupList();
+                }
+            }
+        } catch (err) {
+            // Silently fail
+        }
+    },
+
+    updateUnreadBadges() {
+        // Update group item badges
+        this.state.groups.forEach(g => {
+            const count = this.state.unreadCounts[g.id] || 0;
+            const badgeEl = document.querySelector(
+                `.group-item[data-group-id="${g.id}"] .group-badge`
+            );
+            if (badgeEl) {
+                badgeEl.textContent = count > 99 ? '99+' : count;
+                badgeEl.style.display = count > 0 ? '' : 'none';
+            }
+        });
+
+        // Update global notification badge
+        const total = Object.values(this.state.unreadCounts).reduce(
+            (sum, c) => sum + (parseInt(c) || 0),
+            0
+        );
+        const globalBadge = document.getElementById('notifBadge');
+        if (globalBadge) {
+            globalBadge.textContent = total > 99 ? '99+' : total;
+            globalBadge.style.display = total > 0 ? '' : 'none';
+        }
+
         // Update page title
-        document.title = total > 0 ? `(${total}) NADAR Connect` : 'NADAR Connect';
-    },
+        if (total > 0) {
+            document.title = `(${total}) NADAR Connect`;
+        } else {
+            document.title = 'NADAR Connect';
+        }
 
-    // =========================================================================
-    // UPLOADS
-    // =========================================================================
-
-    uploadFile(file) {
-        return new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            const formData = new FormData();
-            formData.append('file', file);
-
-            // Create progress element
-            const progressContainer = document.getElementById('upload-progress');
-            let progressBar = null;
-            if (progressContainer) {
-                progressContainer.style.display = 'block';
-                progressContainer.innerHTML = `
-                    <div class="upload-progress-item">
-                        <span class="upload-filename">${this.escapeHtml(file.name)}</span>
-                        <div class="progress-bar-track">
-                            <div class="progress-bar-fill" id="progress-fill"></div>
-                        </div>
-                        <span class="upload-percent">0%</span>
-                    </div>
-                `;
-                progressBar = progressContainer.querySelector('.progress-bar-fill');
+        // PWA badge
+        if ('setAppBadge' in navigator) {
+            if (total > 0) {
+                navigator.setAppBadge(total).catch(() => {});
+            } else {
+                navigator.clearAppBadge().catch(() => {});
             }
-
-            xhr.upload.addEventListener('progress', e => {
-                if (e.lengthComputable) {
-                    const percent = Math.round((e.loaded / e.total) * 100);
-                    if (progressBar) progressBar.style.width = percent + '%';
-                    const percentEl = progressContainer?.querySelector('.upload-percent');
-                    if (percentEl) percentEl.textContent = percent + '%';
-                }
-            });
-
-            xhr.addEventListener('load', () => {
-                if (progressContainer) progressContainer.style.display = 'none';
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    try {
-                        const result = JSON.parse(xhr.responseText);
-                        resolve(result);
-                    } catch (e) {
-                        reject(new Error('Invalid response'));
-                    }
-                } else {
-                    reject(new Error(`Upload failed: ${xhr.status}`));
-                }
-            });
-
-            xhr.addEventListener('error', () => {
-                if (progressContainer) progressContainer.style.display = 'none';
-                this.showToast('Échec de l\'envoi du fichier', 'error');
-                reject(new Error('Upload failed'));
-            });
-
-            const csrfMeta = document.querySelector('meta[name="csrf-token"]');
-            xhr.open('POST', `${BASE_URL}/api/upload.php`);
-            if (csrfMeta) {
-                xhr.setRequestHeader('X-CSRF-Token', csrfMeta.getAttribute('content'));
-            }
-            xhr.send(formData);
-        });
-    },
-
-    compressImage(file) {
-        return new Promise((resolve, reject) => {
-            const maxWidth = 1920;
-            const maxHeight = 1920;
-            const quality = 0.8;
-
-            const reader = new FileReader();
-            reader.onload = e => {
-                const img = new Image();
-                img.onload = () => {
-                    let { width, height } = img;
-
-                    // Only resize if needed
-                    if (width <= maxWidth && height <= maxHeight) {
-                        resolve(file);
-                        return;
-                    }
-
-                    const ratio = Math.min(maxWidth / width, maxHeight / height);
-                    width = Math.round(width * ratio);
-                    height = Math.round(height * ratio);
-
-                    const canvas = document.createElement('canvas');
-                    canvas.width = width;
-                    canvas.height = height;
-                    const ctx = canvas.getContext('2d');
-                    ctx.drawImage(img, 0, 0, width, height);
-
-                    canvas.toBlob(
-                        blob => {
-                            if (blob) {
-                                const compressed = new File([blob], file.name, {
-                                    type: 'image/jpeg',
-                                    lastModified: Date.now()
-                                });
-                                resolve(compressed);
-                            } else {
-                                resolve(file);
-                            }
-                        },
-                        'image/jpeg',
-                        quality
-                    );
-                };
-                img.onerror = () => reject(new Error('Image load failed'));
-                img.src = e.target.result;
-            };
-            reader.onerror = () => reject(new Error('File read failed'));
-            reader.readAsDataURL(file);
-        });
-    },
-
-    showImagePreview(files) {
-        const modal = document.getElementById('image-preview-modal');
-        if (!modal) {
-            // Create modal dynamically
-            this.createImagePreviewModal(files);
-            return;
         }
-
-        const body = modal.querySelector('.modal-body');
-        if (!body) return;
-
-        let html = '<div class="image-preview-grid">';
-        files.forEach((file, index) => {
-            const objectUrl = URL.createObjectURL(file);
-            html += `
-                <div class="image-preview-item" data-index="${index}">
-                    <img src="${objectUrl}" alt="${this.escapeHtml(file.name)}" class="preview-thumb">
-                    <span class="preview-name">${this.escapeHtml(file.name)}</span>
-                    <button class="preview-remove" data-index="${index}">&times;</button>
-                </div>
-            `;
-        });
-        html += '</div>';
-        html += `
-            <div class="preview-caption">
-                <input type="text" id="image-caption" placeholder="Ajouter une légende..." class="caption-input">
-            </div>
-            <div class="preview-actions">
-                <button class="btn btn-secondary preview-cancel">Annuler</button>
-                <button class="btn btn-primary preview-send">Envoyer</button>
-            </div>
-        `;
-        body.innerHTML = html;
-
-        // Remove button handler
-        body.querySelectorAll('.preview-remove').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const idx = parseInt(btn.dataset.index, 10);
-                files.splice(idx, 1);
-                if (files.length === 0) {
-                    this.hideModal('image-preview-modal');
-                } else {
-                    this.showImagePreview(files);
-                }
-            });
-        });
-
-        // Cancel
-        body.querySelector('.preview-cancel')?.addEventListener('click', () => {
-            this.hideModal('image-preview-modal');
-        });
-
-        // Send
-        body.querySelector('.preview-send')?.addEventListener('click', async () => {
-            const caption = document.getElementById('image-caption')?.value || '';
-            this.hideModal('image-preview-modal');
-            // Compress images before sending
-            const compressed = await Promise.all(files.map(f => this.compressImage(f)));
-            this.state.attachments = compressed;
-            const composer = document.getElementById('message-composer');
-            if (composer && caption) composer.value = caption;
-            this.handleSendMessage();
-        });
-
-        this.showModal('image-preview-modal');
-    },
-
-    createImagePreviewModal(files) {
-        const modal = document.createElement('div');
-        modal.id = 'image-preview-modal';
-        modal.className = 'modal';
-        modal.innerHTML = `
-            <div class="modal-overlay modal-close"></div>
-            <div class="modal-dialog">
-                <div class="modal-header">
-                    <h3>Aperçu des images</h3>
-                    <button class="modal-close">&times;</button>
-                </div>
-                <div class="modal-body"></div>
-            </div>
-        `;
-        document.body.appendChild(modal);
-        this.showImagePreview(files);
-    },
-
-    showFilePreview(files) {
-        let modal = document.getElementById('file-preview-modal');
-        if (!modal) {
-            modal = document.createElement('div');
-            modal.id = 'file-preview-modal';
-            modal.className = 'modal';
-            modal.innerHTML = `
-                <div class="modal-overlay modal-close"></div>
-                <div class="modal-dialog">
-                    <div class="modal-header">
-                        <h3>Fichiers à envoyer</h3>
-                        <button class="modal-close">&times;</button>
-                    </div>
-                    <div class="modal-body"></div>
-                </div>
-            `;
-            document.body.appendChild(modal);
-        }
-
-        const body = modal.querySelector('.modal-body');
-        if (!body) return;
-
-        let html = '<div class="file-preview-list">';
-        files.forEach((file, index) => {
-            const icon = this.getFileIcon(file.name);
-            html += `
-                <div class="file-preview-card" data-index="${index}">
-                    <span class="file-icon-large">${icon}</span>
-                    <div class="file-preview-info">
-                        <span class="file-preview-name">${this.escapeHtml(file.name)}</span>
-                        <span class="file-preview-size">${this.formatFileSize(file.size)}</span>
-                    </div>
-                    <button class="preview-remove" data-index="${index}">&times;</button>
-                </div>
-            `;
-        });
-        html += '</div>';
-        html += `
-            <div class="preview-actions">
-                <button class="btn btn-secondary preview-cancel">Annuler</button>
-                <button class="btn btn-primary preview-send">Envoyer</button>
-            </div>
-        `;
-        body.innerHTML = html;
-
-        body.querySelectorAll('.preview-remove').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const idx = parseInt(btn.dataset.index, 10);
-                files.splice(idx, 1);
-                if (files.length === 0) {
-                    this.hideModal('file-preview-modal');
-                } else {
-                    this.showFilePreview(files);
-                }
-            });
-        });
-
-        body.querySelector('.preview-cancel')?.addEventListener('click', () => {
-            this.hideModal('file-preview-modal');
-        });
-
-        body.querySelector('.preview-send')?.addEventListener('click', () => {
-            this.hideModal('file-preview-modal');
-            this.state.attachments = [...files];
-            this.handleSendMessage();
-        });
-
-        this.showModal('file-preview-modal');
-    },
-
-    // =========================================================================
-    // UI
-    // =========================================================================
-
-    showView(viewName) {
-        this.state.currentView = viewName;
-        const views = ['login', 'chat', 'library', 'agenda', 'directory', 'admin', 'profile'];
-        views.forEach(v => {
-            const el = document.getElementById(`${v}-view`) || document.getElementById(`${v}-panel`);
-            if (el) el.classList.add('hidden');
-        });
-
-        // Also handle auth views
-        const authViews = ['login-view', 'register-view', 'forgot-view'];
-        if (viewName === 'login') {
-            authViews.forEach(id => {
-                const el = document.getElementById(id);
-                if (el) el.classList.add('hidden');
-            });
-            const loginView = document.getElementById('login-view');
-            if (loginView) loginView.classList.remove('hidden');
-            const authContainer = document.getElementById('auth-container');
-            if (authContainer) authContainer.classList.remove('hidden');
-            const appContainer = document.getElementById('app-container');
-            if (appContainer) appContainer.classList.add('hidden');
-            return;
-        }
-
-        // Show app container, hide auth
-        const authContainer = document.getElementById('auth-container');
-        if (authContainer) authContainer.classList.add('hidden');
-        const appContainer = document.getElementById('app-container');
-        if (appContainer) appContainer.classList.remove('hidden');
-
-        const target = document.getElementById(`${viewName}-view`) || document.getElementById(`${viewName}-panel`);
-        if (target) target.classList.remove('hidden');
-
-        // Load data for specific views
-        switch (viewName) {
-            case 'library':
-                this.loadDocuments('');
-                break;
-            case 'agenda':
-                this.loadEvents();
-                break;
-            case 'directory':
-                this.loadMembers('', 1);
-                break;
-            case 'admin':
-                if (this.state.currentUser && (this.state.currentUser.role === 'admin' || this.state.currentUser.role === 'superadmin')) {
-                    this.loadAdminStats();
-                    this.loadPendingMembers();
-                    this.loadReports();
-                }
-                break;
-            case 'profile':
-                this.loadProfile();
-                break;
-            case 'chat':
-                // Show sidebar + chat on desktop
-                const sidebar = document.getElementById('sidebar');
-                const chatPanel = document.getElementById('chat-panel');
-                if (sidebar) sidebar.classList.remove('hidden');
-                if (chatPanel && !this.state.isMobile) chatPanel.classList.remove('hidden');
-                break;
-        }
-
-        // Update bottom nav active state
-        document.querySelectorAll('[data-view]').forEach(el => {
-            el.classList.toggle('active', el.dataset.view === viewName);
-        });
-    },
-
-    showModal(modalId) {
-        const modal = document.getElementById(modalId);
-        if (!modal) return;
-        modal.classList.add('modal-visible');
-        modal.style.display = 'flex';
-        requestAnimationFrame(() => {
-            modal.classList.add('modal-fade-in');
-        });
-        document.body.style.overflow = 'hidden';
-    },
-
-    hideModal(modalId) {
-        const modal = document.getElementById(modalId);
-        if (!modal) return;
-        modal.classList.remove('modal-fade-in');
-        modal.classList.add('modal-fade-out');
-        setTimeout(() => {
-            modal.style.display = 'none';
-            modal.classList.remove('modal-visible', 'modal-fade-out');
-            document.body.style.overflow = '';
-        }, 300);
-    },
-
-    showToast(message, type = 'info') {
-        let container = document.getElementById('toast-container');
-        if (!container) {
-            container = document.createElement('div');
-            container.id = 'toast-container';
-            container.style.cssText = 'position:fixed;top:20px;right:20px;z-index:10000;display:flex;flex-direction:column;gap:8px;';
-            document.body.appendChild(container);
-        }
-
-        const icons = {
-            success: '✅',
-            error: '❌',
-            warning: '⚠️',
-            info: 'ℹ️'
-        };
-
-        const toast = document.createElement('div');
-        toast.className = `toast toast-${type}`;
-        toast.style.cssText = `
-            display:flex;align-items:center;gap:8px;padding:12px 20px;border-radius:8px;
-            color:#fff;font-size:14px;max-width:350px;box-shadow:0 4px 12px rgba(0,0,0,0.2);
-            transform:translateX(120%);transition:transform 0.3s ease;cursor:pointer;
-        `;
-        const bgColors = {
-            success: '#27ae60',
-            error: '#e74c3c',
-            warning: '#f39c12',
-            info: '#3498db'
-        };
-        toast.style.backgroundColor = bgColors[type] || bgColors.info;
-        toast.innerHTML = `<span>${icons[type] || ''}</span><span>${this.escapeHtml(message)}</span>`;
-
-        container.appendChild(toast);
-        requestAnimationFrame(() => {
-            toast.style.transform = 'translateX(0)';
-        });
-
-        toast.addEventListener('click', () => {
-            toast.style.transform = 'translateX(120%)';
-            setTimeout(() => toast.remove(), 300);
-        });
-
-        setTimeout(() => {
-            toast.style.transform = 'translateX(120%)';
-            setTimeout(() => toast.remove(), 300);
-        }, 3000);
-    },
-
-    showLoading() {
-        let overlay = document.getElementById('loading-overlay');
-        if (!overlay) {
-            overlay = document.createElement('div');
-            overlay.id = 'loading-overlay';
-            overlay.style.cssText = `
-                position:fixed;top:0;left:0;width:100%;height:100%;
-                background:rgba(0,0,0,0.4);display:flex;align-items:center;
-                justify-content:center;z-index:10001;
-            `;
-            overlay.innerHTML = `
-                <div class="loading-spinner" style="
-                    width:48px;height:48px;border:4px solid rgba(255,255,255,0.3);
-                    border-top-color:#fff;border-radius:50%;
-                    animation:spin 0.8s linear infinite;
-                "></div>
-            `;
-            // Add keyframes if not present
-            if (!document.getElementById('spinner-keyframes')) {
-                const style = document.createElement('style');
-                style.id = 'spinner-keyframes';
-                style.textContent = '@keyframes spin{to{transform:rotate(360deg)}}';
-                document.head.appendChild(style);
-            }
-            document.body.appendChild(overlay);
-        }
-        overlay.style.display = 'flex';
-    },
-
-    hideLoading() {
-        const overlay = document.getElementById('loading-overlay');
-        if (overlay) overlay.style.display = 'none';
-    },
-
-    autoResizeComposer(textarea) {
-        textarea.style.height = 'auto';
-        const maxHeight = 120;
-        textarea.style.height = Math.min(textarea.scrollHeight, maxHeight) + 'px';
-    },
-
-    openImageViewer(src) {
-        let viewer = document.getElementById('image-viewer');
-        if (!viewer) {
-            viewer = document.createElement('div');
-            viewer.id = 'image-viewer';
-            viewer.style.cssText = `
-                position:fixed;top:0;left:0;width:100%;height:100%;
-                background:rgba(0,0,0,0.95);display:flex;align-items:center;
-                justify-content:center;z-index:10002;cursor:zoom-out;
-            `;
-            viewer.addEventListener('click', () => {
-                viewer.style.display = 'none';
-            });
-            document.body.appendChild(viewer);
-        }
-        viewer.innerHTML = `<img src="${this.escapeHtml(src)}" style="max-width:90%;max-height:90%;object-fit:contain;">`;
-        viewer.style.display = 'flex';
-    },
-
-    showContextMenu(event, messageId) {
-        // Remove existing
-        const existing = document.querySelector('.context-menu');
-        if (existing) existing.remove();
-
-        this.state.contextMenuTarget = messageId;
-        const msg = this.state.messages.find(m => String(m.id) === String(messageId));
-        const isOwn = msg && this.state.currentUser && msg.sender_id === this.state.currentUser.id;
-        const isAdmin = this.state.currentUser && (this.state.currentUser.role === 'admin' || this.state.currentUser.role === 'superadmin');
-
-        let menuItems = [
-            { label: 'Répondre', action: 'reply', icon: '↩' },
-        ];
-
-        if (isOwn) {
-            menuItems.push({ label: 'Modifier', action: 'edit', icon: '✏' });
-            menuItems.push({ label: 'Supprimer', action: 'delete', icon: '🗑' });
-        }
-
-        if (isOwn || isAdmin) {
-            menuItems.push({ label: 'Infos', action: 'info', icon: 'ℹ' });
-        }
-
-        if (isAdmin) {
-            menuItems.push({ label: 'Épingler', action: 'pin', icon: '📌' });
-        }
-
-        if (!isOwn) {
-            menuItems.push({ label: 'Signaler', action: 'report', icon: '⚠' });
-        }
-
-        const menu = document.createElement('div');
-        menu.className = 'context-menu';
-        menu.style.cssText = `
-            position:fixed;z-index:9999;background:#fff;border-radius:8px;
-            box-shadow:0 4px 16px rgba(0,0,0,0.15);overflow:hidden;min-width:160px;
-        `;
-
-        let menuHtml = '';
-        menuItems.forEach(item => {
-            menuHtml += `
-                <div class="context-menu-item" data-action="${item.action}" style="
-                    padding:10px 16px;cursor:pointer;display:flex;align-items:center;gap:8px;
-                    font-size:14px;transition:background 0.15s;
-                " onmouseover="this.style.background='#f0f0f0'" onmouseout="this.style.background='transparent'">
-                    <span>${item.icon}</span>
-                    <span>${item.label}</span>
-                </div>
-            `;
-        });
-        menu.innerHTML = menuHtml;
-
-        // Position
-        const x = event.clientX || 0;
-        const y = event.clientY || 0;
-        menu.style.left = Math.min(x, window.innerWidth - 200) + 'px';
-        menu.style.top = Math.min(y, window.innerHeight - (menuItems.length * 40 + 20)) + 'px';
-
-        document.body.appendChild(menu);
-
-        // Handle clicks
-        menu.addEventListener('click', e => {
-            const item = e.target.closest('[data-action]');
-            if (!item) return;
-            const action = item.dataset.action;
-            menu.remove();
-
-            switch (action) {
-                case 'reply':
-                    this.startReply(messageId);
-                    break;
-                case 'edit':
-                    this.startEdit(messageId);
-                    break;
-                case 'delete':
-                    this.deleteMessage(parseInt(messageId, 10));
-                    break;
-                case 'info':
-                    this.getMessageInfo(parseInt(messageId, 10));
-                    break;
-                case 'pin':
-                    this.pinMessage(parseInt(messageId, 10));
-                    break;
-                case 'report':
-                    this.showReportDialog(messageId);
-                    break;
-            }
-        });
-    },
-
-    startReply(messageId) {
-        const msg = this.state.messages.find(m => String(m.id) === String(messageId));
-        if (!msg) return;
-
-        this.state.replyingTo = msg.id;
-        const replyBar = document.getElementById('reply-bar');
-        if (replyBar) {
-            replyBar.style.display = 'flex';
-            const replyName = replyBar.querySelector('.reply-bar-name');
-            const replyText = replyBar.querySelector('.reply-bar-text');
-            if (replyName) replyName.textContent = msg.sender_name || '';
-            if (replyText) replyText.textContent = this.truncate(msg.content || '', 60);
-        }
-
-        const composer = document.getElementById('message-composer');
-        if (composer) composer.focus();
-    },
-
-    startEdit(messageId) {
-        const msg = this.state.messages.find(m => String(m.id) === String(messageId));
-        if (!msg) return;
-
-        this.state.editingMessageId = msg.id;
-        const composer = document.getElementById('message-composer');
-        if (composer) {
-            composer.value = msg.content || '';
-            composer.focus();
-            this.autoResizeComposer(composer);
-        }
-
-        const editBar = document.getElementById('edit-bar');
-        if (editBar) {
-            editBar.style.display = 'flex';
-            const editText = editBar.querySelector('.edit-bar-text');
-            if (editText) editText.textContent = this.truncate(msg.content || '', 60);
-        }
-    },
-
-    showReportDialog(messageId) {
-        const reportForm = document.getElementById('report-form');
-        if (reportForm) {
-            reportForm.dataset.messageId = messageId;
-            const reasonSelect = document.getElementById('report-reason');
-            const commentInput = document.getElementById('report-comment');
-            if (reasonSelect) reasonSelect.value = '';
-            if (commentInput) commentInput.value = '';
-        }
-        this.showModal('report-modal');
     },
 
     // =========================================================================
     // SEARCH
     // =========================================================================
+    async search(query) {
+        if (!query || query.length < 2) {
+            const container = document.getElementById('searchResults');
+            if (container) container.innerHTML = '';
+            return;
+        }
 
-    async search(query, filters = {}) {
-        const params = new URLSearchParams({ q: query, ...filters });
-        const result = await this.api(`api/search.php?${params}`);
-        if (result) {
-            this.renderSearchResults(result);
+        try {
+            const data = await this.api(
+                `search.php?action=search&q=${encodeURIComponent(query)}`
+            );
+            this.renderSearchResults(data);
+        } catch (err) {
+            // Silently fail
         }
     },
 
-    renderSearchResults(results) {
-        const container = document.getElementById('search-results');
-        if (!container) return;
+    renderSearchResults(data) {
+        const container = document.getElementById('searchResults');
+        if (!container || !data) return;
 
         let html = '';
 
-        // Messages
-        if (results.messages && results.messages.length > 0) {
-            html += '<div class="search-section"><h4 class="search-section-title">Messages</h4>';
-            results.messages.forEach(msg => {
-                html += `
-                    <div class="search-result-item" data-group-id="${msg.group_id}" data-message-id="${msg.id}">
-                        <div class="search-result-meta">
-                            <span class="search-sender">${this.escapeHtml(msg.sender_name || '')}</span>
-                            <span class="search-group">${this.escapeHtml(msg.group_name || '')}</span>
-                            <span class="search-time">${this.timeAgo(new Date(msg.created_at))}</span>
-                        </div>
-                        <div class="search-result-content">${this.escapeHtml(this.truncate(msg.content || '', 120))}</div>
-                    </div>
-                `;
+        // Messages results
+        if (data.messages && data.messages.length > 0) {
+            html += '<div class="search-section"><h4>Messages</h4>';
+            data.messages.forEach(m => {
+                const groupName = m.group_name || '';
+                const content = m.content || '';
+                const author = m.author_name || '';
+                const time = m.created_at ? this.timeAgo(new Date(m.created_at)) : '';
+
+                html += `<div class="search-result-item" onclick="App.navigateToMessage(${m.group_id}, ${m.id})">
+                    <div class="search-result-group">${this.escapeHtml(groupName)}</div>
+                    <div class="search-result-text">${this.highlightText(this.escapeHtml(this.truncate(content, 120)), document.getElementById('searchInput')?.value || '')}</div>
+                    <div class="search-result-meta">${this.escapeHtml(author)} · ${time}</div>
+                </div>`;
             });
             html += '</div>';
         }
 
-        // Files
-        if (results.files && results.files.length > 0) {
-            html += '<div class="search-section"><h4 class="search-section-title">Fichiers</h4>';
-            results.files.forEach(file => {
-                html += `
-                    <a href="${this.escapeHtml(file.url)}" class="search-result-item search-file" target="_blank" download>
-                        <span class="file-icon">${this.getFileIcon(file.name)}</span>
-                        <div class="search-file-info">
-                            <span class="search-file-name">${this.escapeHtml(file.name)}</span>
-                            <span class="search-file-size">${this.formatFileSize(file.size)}</span>
-                        </div>
-                    </a>
-                `;
+        // Members results
+        if (data.members && data.members.length > 0) {
+            html += '<div class="search-section"><h4>Membres</h4>';
+            data.members.forEach(m => {
+                const name = (m.first_name || '') + ' ' + (m.last_name || '');
+                const info = [m.city, m.institution].filter(Boolean).join(' · ');
+
+                html += `<div class="search-result-item">
+                    <div class="search-result-text">${this.escapeHtml(name.trim())}</div>
+                    ${info ? `<div class="search-result-meta">${this.escapeHtml(info)}</div>` : ''}
+                </div>`;
             });
             html += '</div>';
         }
 
-        // Members
-        if (results.members && results.members.length > 0) {
-            html += '<div class="search-section"><h4 class="search-section-title">Membres</h4>';
-            results.members.forEach(member => {
-                const avatar = member.photo_url
-                    ? `<img src="${this.escapeHtml(member.photo_url)}" class="search-member-avatar">`
-                    : `<img src="${this.generateInitialsAvatar(member.name)}" class="search-member-avatar">`;
-                html += `
-                    <div class="search-result-item search-member">
-                        ${avatar}
-                        <div class="search-member-info">
-                            <span class="search-member-name">${this.escapeHtml(member.name)}</span>
-                            <span class="search-member-specialty">${this.escapeHtml(member.specialty || '')}</span>
-                        </div>
-                    </div>
-                `;
+        // Documents results
+        if (data.documents && data.documents.length > 0) {
+            html += '<div class="search-section"><h4>Documents</h4>';
+            data.documents.forEach(d => {
+                html += `<div class="search-result-item" onclick="App.showView('libraryView')">
+                    <div class="search-result-text">${this.getFileIcon(d.mime_type)} ${this.escapeHtml(d.title || d.file_name)}</div>
+                    <div class="search-result-meta">${this.formatFileSize(d.file_size)}</div>
+                </div>`;
             });
             html += '</div>';
         }
 
         if (!html) {
-            html = '<div class="search-empty">Aucun résultat trouvé</div>';
+            html = '<div class="search-empty"><p>Aucun résultat pour cette recherche</p></div>';
         }
 
         container.innerHTML = html;
-        container.style.display = 'block';
-
-        // Click handler for message results -> navigate to group/message
-        container.querySelectorAll('[data-group-id]').forEach(el => {
-            el.addEventListener('click', () => {
-                const gid = parseInt(el.dataset.groupId, 10);
-                this.openGroup(gid);
-                container.style.display = 'none';
-                const searchInput = document.getElementById('search-input');
-                if (searchInput) searchInput.value = '';
-            });
-        });
     },
 
-    // =========================================================================
-    // LIBRARY
-    // =========================================================================
+    highlightText(text, query) {
+        if (!query || query.length < 2) return text;
+        const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp(`(${escapedQuery})`, 'gi');
+        return text.replace(regex, '<mark>$1</mark>');
+    },
 
-    async loadDocuments(category) {
-        let endpoint = 'api/library.php';
-        if (category) endpoint += `?category=${encodeURIComponent(category)}`;
-        const result = await this.api(endpoint);
-        if (result && result.documents) {
-            this.renderLibrary(result.documents, result.categories || []);
+    async navigateToMessage(groupId, msgId) {
+        this.hideSearch();
+        await this.openGroup(groupId);
+        // Wait for messages to render, then scroll
+        setTimeout(() => this.scrollToMessage(msgId), 500);
+    },
+
+    showSearch() {
+        const overlay = document.getElementById('searchOverlay');
+        if (overlay) {
+            overlay.classList.remove('hidden');
+            const input = document.getElementById('searchInput');
+            if (input) {
+                input.value = '';
+                input.focus();
+            }
+            document.getElementById('searchResults').innerHTML = '';
         }
     },
 
-    renderLibrary(docs, categories = []) {
-        const container = document.getElementById('library-content');
+    hideSearch() {
+        const overlay = document.getElementById('searchOverlay');
+        if (overlay) {
+            overlay.classList.add('hidden');
+        }
+        const input = document.getElementById('searchInput');
+        if (input) input.value = '';
+        const results = document.getElementById('searchResults');
+        if (results) results.innerHTML = '';
+    },
+
+    // =========================================================================
+    // LIBRARY (Documents)
+    // =========================================================================
+    async loadDocuments(category = '') {
+        try {
+            let url = 'documents.php?action=list';
+            if (category) url += `&category=${encodeURIComponent(category)}`;
+            const data = await this.api(url);
+            this.renderLibrary(data?.documents || [], data?.categories || []);
+        } catch (err) {
+            this.showToast('Erreur de chargement des documents', 'error');
+        }
+    },
+
+    renderLibrary(docs, categories) {
+        const container = document.getElementById('libraryContent');
         if (!container) return;
 
-        let html = '';
+        let html = '<div class="library-header">';
+        html += '<h2>Bibliothèque</h2>';
 
-        // Category tabs
-        if (categories.length > 0) {
-            html += '<div class="library-tabs">';
-            html += '<button class="library-tab active" data-category="">Tous</button>';
+        // Category filter
+        if (categories && categories.length > 0) {
+            html += '<div class="library-filters">';
+            html += `<button class="filter-btn active" onclick="App.filterDocuments('')">Tous</button>`;
             categories.forEach(cat => {
-                html += `<button class="library-tab" data-category="${this.escapeHtml(cat)}">${this.escapeHtml(cat)}</button>`;
+                html += `<button class="filter-btn" onclick="App.filterDocuments('${this.escapeHtml(cat)}')">${this.escapeHtml(cat)}</button>`;
             });
             html += '</div>';
         }
 
-        // Document grid
-        html += '<div class="library-grid">';
-        if (docs.length === 0) {
-            html += '<div class="library-empty">Aucun document disponible</div>';
-        } else {
-            docs.forEach(doc => {
-                const icon = this.getFileIcon(doc.filename || doc.name || '');
-                html += `
-                    <div class="library-card">
-                        <div class="library-card-icon">${icon}</div>
-                        <div class="library-card-info">
-                            <h4 class="library-card-name">${this.escapeHtml(doc.name || doc.filename || 'Document')}</h4>
-                            <div class="library-card-meta">
-                                <span class="library-card-size">${doc.size ? this.formatFileSize(doc.size) : ''}</span>
-                                <span class="library-card-date">${doc.created_at ? this.formatDate(new Date(doc.created_at)) : ''}</span>
-                            </div>
-                            ${doc.category ? `<span class="library-card-category">${this.escapeHtml(doc.category)}</span>` : ''}
-                        </div>
-                        <a href="${this.escapeHtml(doc.url || '#')}" class="btn btn-sm btn-primary library-download" download target="_blank">
-                            Télécharger
-                        </a>
-                    </div>
-                `;
-            });
+        // Upload button for admins
+        if (this.isAdmin()) {
+            html += `<button class="btn btn-primary" onclick="App.showUploadDocumentModal()">
+                <span>+</span> Ajouter un document
+            </button>`;
         }
         html += '</div>';
+
+        if (docs.length === 0) {
+            html += '<div class="empty-state"><p>Aucun document pour le moment</p></div>';
+        } else {
+            html += '<div class="library-grid">';
+            docs.forEach(doc => {
+                const icon = this.getFileIcon(doc.mime_type);
+                const date = doc.created_at ? this.formatDate(new Date(doc.created_at)) : '';
+                const size = this.formatFileSize(doc.file_size);
+                const path = doc.file_path?.startsWith('http') ? doc.file_path : '/connect/' + doc.file_path;
+
+                html += `<div class="doc-card">
+                    <div class="doc-icon">${icon}</div>
+                    <div class="doc-info">
+                        <div class="doc-title">${this.escapeHtml(doc.title || doc.file_name)}</div>
+                        ${doc.category ? `<div class="doc-category">${this.escapeHtml(doc.category)}</div>` : ''}
+                        ${doc.description ? `<div class="doc-description">${this.escapeHtml(this.truncate(doc.description, 100))}</div>` : ''}
+                        <div class="doc-meta">
+                            <span>${size}</span>
+                            <span>${date}</span>
+                            ${doc.author_name ? `<span>par ${this.escapeHtml(doc.author_name)}</span>` : ''}
+                        </div>
+                        <div class="doc-actions">
+                            <button class="btn btn-sm btn-primary" onclick="App.downloadFile('${this.escapeHtml(path)}', '${this.escapeHtml(doc.file_name || 'document')}')">
+                                Télécharger
+                            </button>
+                            ${this.isAdmin() ? `<button class="btn btn-sm btn-danger" onclick="App.deleteDocument(${doc.id})">Supprimer</button>` : ''}
+                        </div>
+                    </div>
+                </div>`;
+            });
+            html += '</div>';
+        }
 
         container.innerHTML = html;
     },
 
-    // =========================================================================
-    // AGENDA
-    // =========================================================================
+    filterDocuments(category) {
+        // Update active filter button
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.textContent === (category || 'Tous'));
+        });
+        this.loadDocuments(category);
+    },
 
+    showUploadDocumentModal() {
+        let modal = document.getElementById('uploadDocModal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'uploadDocModal';
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `<div class="modal">
+                <div class="modal-header">
+                    <h3>Ajouter un document</h3>
+                    <button class="modal-close" onclick="App.hideModal('uploadDocModal')">✕</button>
+                </div>
+                <div class="modal-body">
+                    <form id="uploadDocForm" onsubmit="event.preventDefault();App.uploadDocument()">
+                        <div class="form-group">
+                            <label>Titre</label>
+                            <input type="text" name="title" required class="form-input" placeholder="Titre du document">
+                        </div>
+                        <div class="form-group">
+                            <label>Catégorie</label>
+                            <input type="text" name="category" class="form-input" placeholder="Ex: Protocoles, Articles...">
+                        </div>
+                        <div class="form-group">
+                            <label>Description</label>
+                            <textarea name="description" class="form-input" rows="3" placeholder="Description optionnelle"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Fichier</label>
+                            <input type="file" name="file" required class="form-input">
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-block">Envoyer</button>
+                    </form>
+                </div>
+            </div>`;
+            document.body.appendChild(modal);
+        }
+        this.showModal('uploadDocModal');
+    },
+
+    async uploadDocument() {
+        const form = document.getElementById('uploadDocForm');
+        if (!form) return;
+
+        const formData = new FormData(form);
+        formData.append('action', 'upload');
+
+        try {
+            const data = await this.api('documents.php?action=upload', {
+                method: 'POST',
+                body: formData,
+            });
+            if (data && data.success) {
+                this.showToast('Document ajouté', 'success');
+                this.hideModal('uploadDocModal');
+                form.reset();
+                this.loadDocuments();
+            }
+        } catch (err) {
+            this.showToast(err.message, 'error');
+        }
+    },
+
+    async deleteDocument(docId) {
+        if (!confirm('Supprimer ce document ?')) return;
+        try {
+            await this.api('documents.php?action=delete', {
+                method: 'POST',
+                body: { document_id: docId },
+            });
+            this.showToast('Document supprimé', 'success');
+            this.loadDocuments();
+        } catch (err) {
+            this.showToast(err.message, 'error');
+        }
+    },
+
+    // =========================================================================
+    // AGENDA (Events)
+    // =========================================================================
     async loadEvents() {
-        const result = await this.api('api/agenda.php');
-        if (result && result.events) {
-            this.renderAgenda(result.events);
+        try {
+            const data = await this.api('events.php?action=list');
+            this.renderAgenda(data?.events || []);
+        } catch (err) {
+            this.showToast('Erreur de chargement des événements', 'error');
         }
     },
 
     renderAgenda(events) {
-        const container = document.getElementById('agenda-content');
+        const container = document.getElementById('agendaContent');
         if (!container) return;
+
+        let html = '<div class="agenda-header">';
+        html += '<h2>Agenda</h2>';
+        if (this.isAdmin()) {
+            html += `<button class="btn btn-primary" onclick="App.showCreateEventModal()">
+                <span>+</span> Ajouter un événement
+            </button>`;
+        }
+        html += '</div>';
 
         if (events.length === 0) {
-            container.innerHTML = '<div class="agenda-empty">Aucun événement à venir</div>';
-            return;
-        }
+            html += '<div class="empty-state"><p>Aucun événement programmé</p></div>';
+        } else {
+            // Group events: upcoming vs past
+            const now = new Date();
+            const upcoming = events.filter(e => new Date(e.event_date) >= now);
+            const past = events.filter(e => new Date(e.event_date) < now);
 
-        let html = '<div class="agenda-timeline">';
-        let currentMonth = '';
-
-        events.forEach(event => {
-            const eventDate = new Date(event.start_date || event.date);
-            const monthYear = eventDate.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
-
-            if (monthYear !== currentMonth) {
-                currentMonth = monthYear;
-                html += `<div class="agenda-month-header">${this.escapeHtml(monthYear)}</div>`;
+            if (upcoming.length > 0) {
+                html += '<h3 class="agenda-section-title">À venir</h3>';
+                html += '<div class="agenda-list">';
+                upcoming.forEach(evt => {
+                    html += this.renderEventCard(evt);
+                });
+                html += '</div>';
             }
 
-            const dayStr = eventDate.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric' });
-            const timeStr = event.start_time || this.formatTime(eventDate);
-            const endTime = event.end_time || (event.end_date ? this.formatTime(new Date(event.end_date)) : '');
+            if (past.length > 0) {
+                html += '<h3 class="agenda-section-title">Passés</h3>';
+                html += '<div class="agenda-list past">';
+                past.forEach(evt => {
+                    html += this.renderEventCard(evt, true);
+                });
+                html += '</div>';
+            }
+        }
 
-            html += `
-                <div class="agenda-event">
-                    <div class="agenda-event-date">
-                        <span class="agenda-day">${this.escapeHtml(dayStr)}</span>
-                        <span class="agenda-time">${this.escapeHtml(timeStr)}${endTime ? ' - ' + this.escapeHtml(endTime) : ''}</span>
-                    </div>
-                    <div class="agenda-event-content">
-                        <h4 class="agenda-event-title">${this.escapeHtml(event.title)}</h4>
-                        ${event.location ? `<div class="agenda-event-location">📍 ${this.escapeHtml(event.location)}</div>` : ''}
-                        ${event.description ? `<p class="agenda-event-desc">${this.escapeHtml(event.description)}</p>` : ''}
-                    </div>
-                </div>
-            `;
-        });
-
-        html += '</div>';
         container.innerHTML = html;
     },
 
-    // =========================================================================
-    // DIRECTORY
-    // =========================================================================
+    renderEventCard(evt, isPast = false) {
+        const d = new Date(evt.event_date);
+        const months = [
+            'Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Jun',
+            'Jul', 'Aoû', 'Sep', 'Oct', 'Nov', 'Déc',
+        ];
+        const days = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'];
 
-    async loadMembers(search = '', page = 1) {
-        let endpoint = `api/members.php?page=${page}`;
-        if (search) endpoint += `&search=${encodeURIComponent(search)}`;
-        const result = await this.api(endpoint);
-        if (result && result.members) {
-            this.state.membersCache = result.members;
-            this.renderDirectory(result.members, result.total || 0, result.page || 1, result.pages || 1);
+        return `<div class="event-card ${isPast ? 'past' : ''}">
+            <div class="event-date-badge">
+                <span class="event-day-name">${days[d.getDay()]}</span>
+                <span class="event-day">${d.getDate()}</span>
+                <span class="event-month">${months[d.getMonth()]}</span>
+                <span class="event-year">${d.getFullYear()}</span>
+            </div>
+            <div class="event-info">
+                <div class="event-title">${this.escapeHtml(evt.title)}</div>
+                ${evt.location ? `<div class="event-detail">📍 ${this.escapeHtml(evt.location)}</div>` : ''}
+                ${evt.start_time ? `<div class="event-detail">🕐 ${this.escapeHtml(evt.start_time)}${evt.end_time ? ' - ' + this.escapeHtml(evt.end_time) : ''}</div>` : ''}
+                ${evt.description ? `<div class="event-description">${this.escapeHtml(evt.description)}</div>` : ''}
+                <div class="event-actions">
+                    ${evt.registration_link && !isPast ? `<a href="${this.escapeHtml(evt.registration_link)}" target="_blank" rel="noopener" class="btn btn-sm btn-accent">S'inscrire</a>` : ''}
+                    ${this.isAdmin() ? `<button class="btn btn-sm btn-danger" onclick="App.deleteEvent(${evt.id})">Supprimer</button>` : ''}
+                </div>
+            </div>
+        </div>`;
+    },
+
+    showCreateEventModal() {
+        let modal = document.getElementById('createEventModal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'createEventModal';
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `<div class="modal">
+                <div class="modal-header">
+                    <h3>Ajouter un événement</h3>
+                    <button class="modal-close" onclick="App.hideModal('createEventModal')">✕</button>
+                </div>
+                <div class="modal-body">
+                    <form id="createEventForm" onsubmit="event.preventDefault();App.createEvent()">
+                        <div class="form-group">
+                            <label>Titre *</label>
+                            <input type="text" name="title" required class="form-input">
+                        </div>
+                        <div class="form-group">
+                            <label>Date *</label>
+                            <input type="date" name="event_date" required class="form-input">
+                        </div>
+                        <div class="form-group form-row">
+                            <div>
+                                <label>Heure début</label>
+                                <input type="time" name="start_time" class="form-input">
+                            </div>
+                            <div>
+                                <label>Heure fin</label>
+                                <input type="time" name="end_time" class="form-input">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Lieu</label>
+                            <input type="text" name="location" class="form-input">
+                        </div>
+                        <div class="form-group">
+                            <label>Description</label>
+                            <textarea name="description" class="form-input" rows="3"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Lien d'inscription</label>
+                            <input type="url" name="registration_link" class="form-input" placeholder="https://...">
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-block">Créer</button>
+                    </form>
+                </div>
+            </div>`;
+            document.body.appendChild(modal);
+        }
+        this.showModal('createEventModal');
+    },
+
+    async createEvent() {
+        const form = document.getElementById('createEventForm');
+        if (!form) return;
+
+        const formData = new FormData(form);
+        const body = {};
+        for (const [key, value] of formData.entries()) {
+            if (value) body[key] = value;
+        }
+
+        try {
+            const data = await this.api('events.php?action=create', {
+                method: 'POST',
+                body: body,
+            });
+            if (data && data.success) {
+                this.showToast('Événement créé', 'success');
+                this.hideModal('createEventModal');
+                form.reset();
+                this.loadEvents();
+            }
+        } catch (err) {
+            this.showToast(err.message, 'error');
         }
     },
 
-    renderDirectory(members, total = 0, currentPage = 1, totalPages = 1) {
-        const container = document.getElementById('directory-content');
+    async deleteEvent(eventId) {
+        if (!confirm('Supprimer cet événement ?')) return;
+        try {
+            await this.api('events.php?action=delete', {
+                method: 'POST',
+                body: { event_id: eventId },
+            });
+            this.showToast('Événement supprimé', 'success');
+            this.loadEvents();
+        } catch (err) {
+            this.showToast(err.message, 'error');
+        }
+    },
+
+    // =========================================================================
+    // DIRECTORY (Members)
+    // =========================================================================
+    async loadMembers(searchQuery = '', page = 1) {
+        try {
+            let url = `members.php?action=list&page=${page}&per_page=30`;
+            if (searchQuery) url += `&search=${encodeURIComponent(searchQuery)}`;
+            const data = await this.api(url);
+            this.renderDirectory(data?.members || [], data?.total || 0, page, searchQuery);
+        } catch (err) {
+            this.showToast('Erreur de chargement de l\'annuaire', 'error');
+        }
+    },
+
+    renderDirectory(members, total, page, searchQuery) {
+        const container = document.getElementById('directoryContent');
         if (!container) return;
 
-        let html = `
-            <div class="directory-header">
-                <input type="text" id="directory-search" placeholder="Rechercher un membre..." class="directory-search-input" value="">
-                <span class="directory-count">${total} membre${total > 1 ? 's' : ''}</span>
-            </div>
-            <div class="directory-grid">
-        `;
-
-        if (members.length === 0) {
-            html += '<div class="directory-empty">Aucun membre trouvé</div>';
-        } else {
-            members.forEach(member => {
-                const name = `${member.first_name || ''} ${member.last_name || ''}`.trim();
-                const avatarHtml = member.photo_url
-                    ? `<img src="${this.escapeHtml(member.photo_url)}" class="directory-avatar" alt="">`
-                    : `<img src="${this.generateInitialsAvatar(name)}" class="directory-avatar" alt="">`;
-
-                html += `
-                    <div class="directory-card">
-                        <div class="directory-card-avatar">${avatarHtml}</div>
-                        <h4 class="directory-card-name">${this.escapeHtml(name)}</h4>
-                        ${member.specialty ? `<div class="directory-card-specialty">${this.escapeHtml(member.specialty)}</div>` : ''}
-                        ${member.city ? `<div class="directory-card-city">📍 ${this.escapeHtml(member.city)}</div>` : ''}
-                    </div>
-                `;
-            });
-        }
-
+        let html = '<div class="directory-header">';
+        html += '<h2>Annuaire des membres</h2>';
+        html += `<div class="directory-search">
+            <input type="text" class="form-input" placeholder="Rechercher un membre..."
+                value="${this.escapeHtml(searchQuery || '')}"
+                oninput="App.debounce(() => App.loadMembers(this.value), 400)()">
+        </div>`;
+        html += `<div class="directory-count">${total} membre${total > 1 ? 's' : ''}</div>`;
         html += '</div>';
 
-        // Pagination
-        if (totalPages > 1) {
-            html += '<div class="directory-pagination">';
-            for (let p = 1; p <= totalPages; p++) {
-                html += `<button class="pagination-btn ${p === currentPage ? 'active' : ''}" data-page="${p}">${p}</button>`;
-            }
+        if (members.length === 0) {
+            html += '<div class="empty-state"><p>Aucun membre trouvé</p></div>';
+        } else {
+            html += '<div class="directory-grid">';
+            members.forEach(m => {
+                const initials = (
+                    (m.first_name?.[0] || '') + (m.last_name?.[0] || '')
+                ).toUpperCase();
+
+                const avatar = m.profile_photo
+                    ? `<img src="/connect/${this.escapeHtml(m.profile_photo)}" class="member-avatar" alt="${this.escapeHtml(m.first_name)}" loading="lazy">`
+                    : `<div class="member-avatar member-avatar-initials">${initials}</div>`;
+
+                const roleBadge = m.role === 'admin' || m.role === 'super_admin'
+                    ? '<span class="role-badge admin">Admin</span>'
+                    : '';
+
+                html += `<div class="member-card">
+                    ${avatar}
+                    <div class="member-name">${this.escapeHtml((m.first_name || '') + ' ' + (m.last_name || ''))} ${roleBadge}</div>
+                    ${m.specialty ? `<div class="member-specialty">${this.escapeHtml(m.specialty)}</div>` : ''}
+                    ${m.city ? `<div class="member-city">📍 ${this.escapeHtml(m.city)}</div>` : ''}
+                    ${m.institution ? `<div class="member-institution">🏥 ${this.escapeHtml(m.institution)}</div>` : ''}
+                    ${m.email ? `<div class="member-email"><a href="mailto:${this.escapeHtml(m.email)}">${this.escapeHtml(m.email)}</a></div>` : ''}
+                </div>`;
+            });
             html += '</div>';
+
+            // Pagination
+            const totalPages = Math.ceil(total / 30);
+            if (totalPages > 1) {
+                html += '<div class="pagination">';
+                for (let i = 1; i <= totalPages; i++) {
+                    html += `<button class="page-btn ${i === page ? 'active' : ''}" onclick="App.loadMembers('${this.escapeHtml(searchQuery || '')}', ${i})">${i}</button>`;
+                }
+                html += '</div>';
+            }
         }
 
         container.innerHTML = html;
-
-        // Search input handler
-        const searchInput = document.getElementById('directory-search');
-        if (searchInput) {
-            searchInput.addEventListener('input', this.debounce(e => {
-                this.loadMembers(e.target.value.trim(), 1);
-            }, 400));
-        }
-
-        // Pagination handler
-        container.querySelectorAll('.pagination-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const page = parseInt(btn.dataset.page, 10);
-                const search = document.getElementById('directory-search')?.value || '';
-                this.loadMembers(search, page);
-            });
-        });
     },
 
     // =========================================================================
     // PROFILE
     // =========================================================================
+    renderProfile() {
+        const container = document.getElementById('profileContent');
+        if (!container || !this.state.user) return;
 
-    async loadProfile() {
-        const result = await this.api('api/auth.php?action=me');
-        if (result && result.user) {
-            this.state.currentUser = result.user;
-            this.renderProfile(result.user);
-        }
-    },
-
-    renderProfile(user) {
-        const container = document.getElementById('profile-content');
-        if (!container) return;
-
-        const name = `${user.first_name || ''} ${user.last_name || ''}`.trim();
-        const avatarHtml = user.photo_url
-            ? `<img src="${this.escapeHtml(user.photo_url)}" class="profile-photo" id="profile-photo-display">`
-            : `<img src="${this.generateInitialsAvatar(name)}" class="profile-photo" id="profile-photo-display">`;
+        const u = this.state.user;
+        const initials = (
+            (u.first_name?.[0] || '') + (u.last_name?.[0] || '')
+        ).toUpperCase();
 
         container.innerHTML = `
-            <div class="profile-header">
-                <div class="profile-avatar-section">
-                    ${avatarHtml}
-                    <label for="profile-photo-input" class="profile-photo-edit">📷 Changer la photo</label>
-                    <input type="file" id="profile-photo-input" accept="image/*" style="display:none">
-                </div>
-                <h2 class="profile-name">${this.escapeHtml(name)}</h2>
-                <span class="profile-role">${this.escapeHtml(user.role || 'membre')}</span>
-            </div>
-            <form id="profile-form" class="profile-form">
-                <div class="form-group">
-                    <label>Prénom</label>
-                    <input type="text" name="first_name" value="${this.escapeHtml(user.first_name || '')}" required>
-                </div>
-                <div class="form-group">
-                    <label>Nom</label>
-                    <input type="text" name="last_name" value="${this.escapeHtml(user.last_name || '')}" required>
-                </div>
-                <div class="form-group">
-                    <label>Email</label>
-                    <input type="email" name="email" value="${this.escapeHtml(user.email || '')}" readonly>
-                </div>
-                <div class="form-group">
-                    <label>Téléphone</label>
-                    <input type="tel" name="phone" value="${this.escapeHtml(user.phone || '')}">
-                </div>
-                <div class="form-group">
-                    <label>Spécialité</label>
-                    <input type="text" name="specialty" value="${this.escapeHtml(user.specialty || '')}">
-                </div>
-                <div class="form-group">
-                    <label>Ville</label>
-                    <input type="text" name="city" value="${this.escapeHtml(user.city || '')}">
-                </div>
-                <div class="form-group">
-                    <label>Bio</label>
-                    <textarea name="bio" rows="3">${this.escapeHtml(user.bio || '')}</textarea>
-                </div>
-                <button type="submit" class="btn btn-primary">Enregistrer</button>
-            </form>
-            <div class="profile-actions">
-                <button id="enable-push-btn" class="btn btn-secondary">Activer les notifications push</button>
-                <button id="logout-btn" class="btn btn-danger">Se déconnecter</button>
-            </div>
-        `;
+            <div class="profile-page">
+                <div class="profile-card">
+                    <div class="profile-avatar-wrapper">
+                        ${u.profile_photo
+                            ? `<img src="/connect/${this.escapeHtml(u.profile_photo)}" class="profile-avatar" alt="Photo de profil">`
+                            : `<div class="profile-avatar profile-avatar-initials">${initials}</div>`}
+                    </div>
+                    <h2 class="profile-name">${this.escapeHtml((u.first_name || '') + ' ' + (u.last_name || ''))}</h2>
+                    ${u.specialty ? `<div class="profile-specialty">${this.escapeHtml(u.specialty)}</div>` : ''}
 
-        // Re-bind event listeners for dynamically created elements
-        const profilePhotoInput = document.getElementById('profile-photo-input');
-        if (profilePhotoInput) {
-            profilePhotoInput.addEventListener('change', e => {
-                if (e.target.files[0]) this.uploadProfilePhoto(e.target.files[0]);
-            });
-        }
+                    <div class="profile-info-list">
+                        <div class="profile-info-item">
+                            <span class="profile-info-label">Email</span>
+                            <span class="profile-info-value">${this.escapeHtml(u.email)}</span>
+                        </div>
+                        <div class="profile-info-item">
+                            <span class="profile-info-label">Téléphone</span>
+                            <span class="profile-info-value">${this.escapeHtml(u.phone || '-')}</span>
+                        </div>
+                        <div class="profile-info-item">
+                            <span class="profile-info-label">Ville</span>
+                            <span class="profile-info-value">${this.escapeHtml(u.city || '-')}</span>
+                        </div>
+                        <div class="profile-info-item">
+                            <span class="profile-info-label">Établissement</span>
+                            <span class="profile-info-value">${this.escapeHtml(u.institution || '-')}</span>
+                        </div>
+                        <div class="profile-info-item">
+                            <span class="profile-info-label">Statut</span>
+                            <span class="profile-info-value">${this.escapeHtml(this.getRoleLabel(u.role))}</span>
+                        </div>
+                        <div class="profile-info-item">
+                            <span class="profile-info-label">Membre depuis</span>
+                            <span class="profile-info-value">${u.created_at ? this.formatDate(new Date(u.created_at)) : '-'}</span>
+                        </div>
+                    </div>
 
-        const profileForm = document.getElementById('profile-form');
-        if (profileForm) {
-            profileForm.addEventListener('submit', e => {
-                e.preventDefault();
-                const formData = new FormData(profileForm);
-                const data = {};
-                formData.forEach((val, key) => { data[key] = val; });
-                this.updateProfile(data);
-            });
-        }
-
-        const logoutBtn = document.getElementById('logout-btn');
-        if (logoutBtn) {
-            logoutBtn.addEventListener('click', e => {
-                e.preventDefault();
-                this.logout();
-            });
-        }
-
-        const pushBtn = document.getElementById('enable-push-btn');
-        if (pushBtn) {
-            pushBtn.addEventListener('click', () => this.requestPushPermission());
-        }
+                    <div class="profile-actions">
+                        <button class="btn btn-primary" onclick="App.showProfileEditModal()">Modifier le profil</button>
+                        <button class="btn btn-outline" onclick="App.showChangePasswordModal()">Changer le mot de passe</button>
+                        <button class="btn btn-danger" onclick="App.logout()">Déconnexion</button>
+                    </div>
+                </div>
+            </div>`;
     },
 
-    async updateProfile(data) {
-        this.showLoading();
-        const result = await this.api('api/profile.php', {
-            method: 'PUT',
-            body: data
-        });
-        this.hideLoading();
-        if (result && result.success) {
-            if (result.user) this.state.currentUser = result.user;
-            this.showToast('Profil mis à jour', 'success');
-            this.renderUserInfo();
-        }
+    getRoleLabel(role) {
+        const labels = {
+            super_admin: 'Super Administrateur',
+            admin: 'Administrateur',
+            member: 'Membre',
+            pending: 'En attente de validation',
+            blocked: 'Bloqué',
+        };
+        return labels[role] || role || '';
     },
 
-    async uploadProfilePhoto(file) {
-        this.showLoading();
-        const compressed = await this.compressImage(file);
-        const formData = new FormData();
-        formData.append('photo', compressed);
+    showProfileEditModal() {
+        const u = this.state.user;
+        if (!u) return;
 
-        const result = await this.api('api/profile.php?action=photo', {
-            method: 'POST',
-            body: formData
-        });
-        this.hideLoading();
-        if (result && result.success) {
-            if (result.photo_url) {
-                this.state.currentUser.photo_url = result.photo_url;
-                const photo = document.getElementById('profile-photo-display');
-                if (photo) photo.src = result.photo_url;
+        let modal = document.getElementById('profileEditModal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'profileEditModal';
+            modal.className = 'modal-overlay';
+            document.body.appendChild(modal);
+        }
+
+        modal.innerHTML = `<div class="modal">
+            <div class="modal-header">
+                <h3>Modifier le profil</h3>
+                <button class="modal-close" onclick="App.hideModal('profileEditModal')">✕</button>
+            </div>
+            <div class="modal-body">
+                <form id="profileEditForm" onsubmit="event.preventDefault();App.saveProfileEdit()">
+                    <div class="form-group">
+                        <label>Prénom *</label>
+                        <input type="text" name="first_name" class="form-input" value="${this.escapeHtml(u.first_name || '')}" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Nom *</label>
+                        <input type="text" name="last_name" class="form-input" value="${this.escapeHtml(u.last_name || '')}" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Téléphone</label>
+                        <input type="tel" name="phone" class="form-input" value="${this.escapeHtml(u.phone || '')}">
+                    </div>
+                    <div class="form-group">
+                        <label>Ville</label>
+                        <input type="text" name="city" class="form-input" value="${this.escapeHtml(u.city || '')}">
+                    </div>
+                    <div class="form-group">
+                        <label>Établissement</label>
+                        <input type="text" name="institution" class="form-input" value="${this.escapeHtml(u.institution || '')}">
+                    </div>
+                    <div class="form-group">
+                        <label>Spécialité</label>
+                        <input type="text" name="specialty" class="form-input" value="${this.escapeHtml(u.specialty || '')}">
+                    </div>
+                    <div class="form-group">
+                        <label>Photo de profil</label>
+                        <input type="file" name="profile_photo" class="form-input" accept="image/*">
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-block">Enregistrer</button>
+                </form>
+            </div>
+        </div>`;
+
+        this.showModal('profileEditModal');
+    },
+
+    async saveProfileEdit() {
+        const form = document.getElementById('profileEditForm');
+        if (!form) return;
+
+        const formData = new FormData(form);
+        formData.append('action', 'update');
+
+        try {
+            const data = await this.api('members.php?action=update', {
+                method: 'POST',
+                body: formData,
+            });
+            if (data && data.user) {
+                this.state.user = { ...this.state.user, ...data.user };
+                this.renderProfile();
+                this.updateUserUI();
+                this.showToast('Profil mis à jour', 'success');
+                this.hideModal('profileEditModal');
             }
-            this.renderUserInfo();
-            this.showToast('Photo mise à jour', 'success');
+        } catch (err) {
+            this.showToast(err.message, 'error');
+        }
+    },
+
+    async updateProfile(formData) {
+        try {
+            const data = await this.api('members.php?action=update', {
+                method: 'POST',
+                body: formData,
+            });
+            if (data && data.user) {
+                this.state.user = { ...this.state.user, ...data.user };
+                this.renderProfile();
+                this.updateUserUI();
+                this.showToast('Profil mis à jour', 'success');
+                this.hideModal('profileModal');
+            }
+        } catch (err) {
+            this.showToast(err.message, 'error');
+        }
+    },
+
+    showChangePasswordModal() {
+        let modal = document.getElementById('changePasswordModal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'changePasswordModal';
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `<div class="modal">
+                <div class="modal-header">
+                    <h3>Changer le mot de passe</h3>
+                    <button class="modal-close" onclick="App.hideModal('changePasswordModal')">✕</button>
+                </div>
+                <div class="modal-body">
+                    <form id="changePasswordForm" onsubmit="event.preventDefault();App.handleChangePassword()">
+                        <div class="form-group">
+                            <label>Mot de passe actuel</label>
+                            <input type="password" name="current_password" class="form-input" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Nouveau mot de passe</label>
+                            <input type="password" name="new_password" class="form-input" required minlength="8">
+                        </div>
+                        <div class="form-group">
+                            <label>Confirmer le nouveau mot de passe</label>
+                            <input type="password" name="confirm_password" class="form-input" required>
+                        </div>
+                        <div id="changePasswordError" class="form-error"></div>
+                        <button type="submit" class="btn btn-primary btn-block">Modifier</button>
+                    </form>
+                </div>
+            </div>`;
+            document.body.appendChild(modal);
+        }
+        document.getElementById('changePasswordForm')?.reset();
+        document.getElementById('changePasswordError').textContent = '';
+        this.showModal('changePasswordModal');
+    },
+
+    async handleChangePassword() {
+        const form = document.getElementById('changePasswordForm');
+        const errorEl = document.getElementById('changePasswordError');
+        if (!form) return;
+
+        const currentPassword = form.querySelector('[name="current_password"]').value;
+        const newPassword = form.querySelector('[name="new_password"]').value;
+        const confirmPassword = form.querySelector('[name="confirm_password"]').value;
+
+        if (newPassword !== confirmPassword) {
+            if (errorEl) errorEl.textContent = 'Les mots de passe ne correspondent pas';
+            return;
+        }
+
+        if (newPassword.length < 8) {
+            if (errorEl) errorEl.textContent = 'Le mot de passe doit contenir au moins 8 caractères';
+            return;
+        }
+
+        try {
+            await this.changePassword(currentPassword, newPassword);
+            this.hideModal('changePasswordModal');
+        } catch (err) {
+            if (errorEl) errorEl.textContent = err.message;
         }
     },
 
     // =========================================================================
     // ADMIN
     // =========================================================================
+    isAdmin() {
+        return (
+            this.state.user &&
+            ['super_admin', 'admin'].includes(this.state.user.role)
+        );
+    },
 
-    async loadPendingMembers() {
-        const result = await this.api('api/admin.php?action=pending');
-        if (result && result.members) {
-            this.renderPendingMembers(result.members);
+    async loadAdminDashboard() {
+        if (!this.isAdmin()) {
+            this.showView('chatView');
+            return;
+        }
+
+        const container = document.getElementById('adminContent');
+        if (container) {
+            container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+        }
+
+        try {
+            const [stats, pending, reports] = await Promise.all([
+                this.api('admin.php?action=stats'),
+                this.api('admin.php?action=pending'),
+                this.api('admin.php?action=reports'),
+            ]);
+            this.renderAdminDashboard(stats, pending, reports);
+        } catch (err) {
+            this.showToast(err.message, 'error');
+            if (container) {
+                container.innerHTML =
+                    '<div class="empty-state"><p>Erreur de chargement du tableau de bord</p></div>';
+            }
         }
     },
 
+    renderAdminDashboard(stats, pending, reports) {
+        const container = document.getElementById('adminContent');
+        if (!container) return;
+
+        const s = stats || {};
+        const pendingMembers = pending?.members || [];
+        const reportsList = reports?.reports || [];
+
+        let html = `<div class="admin-container">
+            <h2>Tableau de bord administrateur</h2>
+
+            <div class="admin-stats">
+                <div class="stat-card">
+                    <div class="stat-icon">👥</div>
+                    <div class="stat-value">${s.total_members || 0}</div>
+                    <div class="stat-label">Membres actifs</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">⏳</div>
+                    <div class="stat-value">${s.pending_members || 0}</div>
+                    <div class="stat-label">En attente</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">💬</div>
+                    <div class="stat-value">${s.total_messages || 0}</div>
+                    <div class="stat-label">Messages</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">📁</div>
+                    <div class="stat-value">${s.total_groups || 0}</div>
+                    <div class="stat-label">Salons</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">📄</div>
+                    <div class="stat-value">${s.total_documents || 0}</div>
+                    <div class="stat-label">Documents</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">⚠️</div>
+                    <div class="stat-value">${s.open_reports || 0}</div>
+                    <div class="stat-label">Signalements</div>
+                </div>
+            </div>
+
+            <div class="admin-section">
+                <h3>Demandes d'inscription (${pendingMembers.length})</h3>
+                ${pendingMembers.length === 0
+                    ? '<p class="text-muted">Aucune demande en attente</p>'
+                    : `<div class="admin-table-wrapper"><table class="admin-table">
+                    <thead>
+                        <tr>
+                            <th>Nom</th>
+                            <th>Email</th>
+                            <th>Ville</th>
+                            <th>Établissement</th>
+                            <th>Date</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${pendingMembers.map(m => `<tr>
+                            <td>${this.escapeHtml((m.first_name || '') + ' ' + (m.last_name || ''))}</td>
+                            <td>${this.escapeHtml(m.email || '')}</td>
+                            <td>${this.escapeHtml(m.city || '-')}</td>
+                            <td>${this.escapeHtml(m.institution || '-')}</td>
+                            <td>${m.created_at ? this.formatDate(new Date(m.created_at)) : '-'}</td>
+                            <td class="action-cell">
+                                <button class="btn btn-sm btn-primary" onclick="App.approveMember(${m.id})">Accepter</button>
+                                <button class="btn btn-sm btn-danger" onclick="App.rejectMember(${m.id})">Refuser</button>
+                            </td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table></div>`}
+            </div>
+
+            <div class="admin-section">
+                <h3>Signalements (${reportsList.length})</h3>
+                ${reportsList.length === 0
+                    ? '<p class="text-muted">Aucun signalement</p>'
+                    : `<div class="admin-table-wrapper"><table class="admin-table">
+                    <thead>
+                        <tr>
+                            <th>Message</th>
+                            <th>Auteur</th>
+                            <th>Motif</th>
+                            <th>Signalé par</th>
+                            <th>Date</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${reportsList.map(r => `<tr>
+                            <td title="${this.escapeHtml(r.content || '')}">${this.escapeHtml(this.truncate(r.content || '', 50))}</td>
+                            <td>${this.escapeHtml(r.author_name || '-')}</td>
+                            <td>${this.escapeHtml(r.reason || '-')}</td>
+                            <td>${this.escapeHtml(r.reporter_name || '-')}</td>
+                            <td>${r.created_at ? this.formatDate(new Date(r.created_at)) : '-'}</td>
+                            <td class="action-cell">
+                                <button class="btn btn-sm btn-outline" onclick="App.handleReport(${r.id}, 'dismiss')">Ignorer</button>
+                                <button class="btn btn-sm btn-danger" onclick="App.handleReport(${r.id}, 'delete')">Supprimer msg</button>
+                                <button class="btn btn-sm btn-danger" onclick="App.handleReport(${r.id}, 'suspend')">Suspendre auteur</button>
+                            </td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table></div>`}
+            </div>
+
+            <div class="admin-section">
+                <h3>Gestion des salons</h3>
+                <button class="btn btn-primary" onclick="App.showCreateGroupModal()">Créer un salon</button>
+            </div>
+        </div>`;
+
+        container.innerHTML = html;
+    },
+
+    showCreateGroupModal() {
+        let modal = document.getElementById('createGroupModal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'createGroupModal';
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `<div class="modal">
+                <div class="modal-header">
+                    <h3>Créer un salon</h3>
+                    <button class="modal-close" onclick="App.hideModal('createGroupModal')">✕</button>
+                </div>
+                <div class="modal-body">
+                    <form id="createGroupForm" onsubmit="event.preventDefault();App.handleCreateGroup()">
+                        <div class="form-group">
+                            <label>Nom du salon *</label>
+                            <input type="text" name="name" class="form-input" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Type</label>
+                            <select name="type" class="form-input">
+                                <option value="general">Général</option>
+                                <option value="announcement">Annonces</option>
+                                <option value="clinical_cases">Cas cliniques</option>
+                                <option value="scientific">Scientifique</option>
+                                <option value="other">Autre</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Description</label>
+                            <textarea name="description" class="form-input" rows="3"></textarea>
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-block">Créer</button>
+                    </form>
+                </div>
+            </div>`;
+            document.body.appendChild(modal);
+        }
+        this.showModal('createGroupModal');
+    },
+
+    async handleCreateGroup() {
+        const form = document.getElementById('createGroupForm');
+        if (!form) return;
+        const name = form.querySelector('[name="name"]').value.trim();
+        const type = form.querySelector('[name="type"]').value;
+        const description = form.querySelector('[name="description"]').value.trim();
+        if (!name) return;
+
+        await this.createGroup(name, type, description);
+        this.hideModal('createGroupModal');
+        form.reset();
+    },
+
     async approveMember(id) {
-        const result = await this.api('api/admin.php?action=approve', {
-            method: 'POST',
-            body: { member_id: id }
-        });
-        if (result && result.success) {
+        try {
+            await this.api('admin.php?action=approve', {
+                method: 'POST',
+                body: { user_id: id },
+            });
             this.showToast('Membre approuvé', 'success');
-            this.loadPendingMembers();
-            this.loadAdminStats();
+            this.loadAdminDashboard();
+        } catch (err) {
+            this.showToast(err.message, 'error');
         }
     },
 
     async rejectMember(id) {
-        if (!confirm('Rejeter cette inscription ?')) return;
-        const result = await this.api('api/admin.php?action=reject', {
-            method: 'POST',
-            body: { member_id: id }
-        });
-        if (result && result.success) {
-            this.showToast('Inscription rejetée', 'success');
-            this.loadPendingMembers();
-            this.loadAdminStats();
+        if (!confirm('Refuser cette demande d\'inscription ?')) return;
+        try {
+            await this.api('admin.php?action=reject', {
+                method: 'POST',
+                body: { user_id: id },
+            });
+            this.showToast('Demande refusée', 'success');
+            this.loadAdminDashboard();
+        } catch (err) {
+            this.showToast(err.message, 'error');
         }
     },
 
     async suspendMember(id) {
         if (!confirm('Suspendre ce membre ?')) return;
-        const result = await this.api('api/admin.php?action=suspend', {
-            method: 'POST',
-            body: { member_id: id }
-        });
-        if (result && result.success) {
+        try {
+            await this.api('admin.php?action=suspend', {
+                method: 'POST',
+                body: { user_id: id },
+            });
             this.showToast('Membre suspendu', 'success');
-            this.loadPendingMembers();
-        }
-    },
-
-    async changeRole(id, role) {
-        const result = await this.api('api/admin.php?action=change-role', {
-            method: 'POST',
-            body: { member_id: id, role }
-        });
-        if (result && result.success) {
-            this.showToast('Rôle modifié', 'success');
-        }
-    },
-
-    async loadReports() {
-        const result = await this.api('api/admin.php?action=reports');
-        if (result && result.reports) {
-            this.renderReports(result.reports);
+            this.loadAdminDashboard();
+        } catch (err) {
+            this.showToast(err.message, 'error');
         }
     },
 
     async handleReport(id, action) {
-        const result = await this.api('api/admin.php?action=handle-report', {
-            method: 'POST',
-            body: { report_id: id, action }
-        });
-        if (result && result.success) {
-            const labels = { dismiss: 'Signalement rejeté', warn: 'Avertissement envoyé', ban: 'Membre banni' };
-            this.showToast(labels[action] || 'Action effectuée', 'success');
-            this.loadReports();
+        try {
+            await this.api('admin.php?action=handle-report', {
+                method: 'POST',
+                body: { report_id: id, action: action },
+            });
+            this.showToast('Signalement traité', 'success');
+            this.loadAdminDashboard();
+        } catch (err) {
+            this.showToast(err.message, 'error');
         }
     },
 
-    async loadAdminStats() {
-        const result = await this.api('api/admin.php?action=stats');
-        if (result && result.stats) {
-            this.renderAdminDashboard(result.stats);
+    async manageMemberRole(userId, newRole) {
+        if (!confirm(`Changer le rôle de ce membre en "${this.getRoleLabel(newRole)}" ?`)) return;
+        try {
+            await this.api('admin.php?action=change-role', {
+                method: 'POST',
+                body: { user_id: userId, role: newRole },
+            });
+            this.showToast('Rôle modifié', 'success');
+            this.loadAdminDashboard();
+        } catch (err) {
+            this.showToast(err.message, 'error');
         }
-    },
-
-    renderAdminDashboard(stats) {
-        const container = document.getElementById('admin-stats');
-        if (!container) return;
-
-        container.innerHTML = `
-            <div class="admin-stats-grid">
-                <div class="stat-card">
-                    <div class="stat-number">${stats.total_members || 0}</div>
-                    <div class="stat-label">Membres</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number">${stats.pending_members || 0}</div>
-                    <div class="stat-label">En attente</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number">${stats.total_messages || 0}</div>
-                    <div class="stat-label">Messages</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number">${stats.total_groups || 0}</div>
-                    <div class="stat-label">Groupes</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number">${stats.active_today || 0}</div>
-                    <div class="stat-label">Actifs aujourd'hui</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number">${stats.pending_reports || 0}</div>
-                    <div class="stat-label">Signalements</div>
-                </div>
-            </div>
-        `;
-    },
-
-    renderPendingMembers(members) {
-        const container = document.getElementById('admin-pending');
-        if (!container) return;
-
-        if (members.length === 0) {
-            container.innerHTML = '<p class="admin-empty">Aucune inscription en attente</p>';
-            return;
-        }
-
-        let html = '<h3>Inscriptions en attente</h3><div class="admin-table">';
-        html += `
-            <div class="admin-table-header">
-                <span>Nom</span>
-                <span>Email</span>
-                <span>Spécialité</span>
-                <span>Date</span>
-                <span>Actions</span>
-            </div>
-        `;
-
-        members.forEach(member => {
-            const name = `${member.first_name || ''} ${member.last_name || ''}`.trim();
-            html += `
-                <div class="admin-member-row">
-                    <span>${this.escapeHtml(name)}</span>
-                    <span>${this.escapeHtml(member.email || '')}</span>
-                    <span>${this.escapeHtml(member.specialty || '-')}</span>
-                    <span>${member.created_at ? this.formatDate(new Date(member.created_at)) : ''}</span>
-                    <span class="admin-actions">
-                        <button class="btn btn-sm btn-success" data-admin-action="approve" data-id="${member.id}">Approuver</button>
-                        <button class="btn btn-sm btn-danger" data-admin-action="reject" data-id="${member.id}">Rejeter</button>
-                    </span>
-                </div>
-            `;
-        });
-
-        html += '</div>';
-        container.innerHTML = html;
-    },
-
-    renderReports(reports) {
-        const container = document.getElementById('admin-reports');
-        if (!container) return;
-
-        if (reports.length === 0) {
-            container.innerHTML = '<p class="admin-empty">Aucun signalement en attente</p>';
-            return;
-        }
-
-        let html = '<h3>Signalements</h3><div class="admin-table">';
-        html += `
-            <div class="admin-table-header">
-                <span>Message</span>
-                <span>Signalé par</span>
-                <span>Raison</span>
-                <span>Date</span>
-                <span>Actions</span>
-            </div>
-        `;
-
-        reports.forEach(report => {
-            html += `
-                <div class="admin-report-row">
-                    <span class="report-message-preview">${this.escapeHtml(this.truncate(report.message_content || '', 60))}</span>
-                    <span>${this.escapeHtml(report.reporter_name || '')}</span>
-                    <span>${this.escapeHtml(report.reason || '')}</span>
-                    <span>${report.created_at ? this.formatDate(new Date(report.created_at)) : ''}</span>
-                    <span class="admin-actions">
-                        <button class="btn btn-sm btn-secondary" data-admin-action="dismiss-report" data-id="${report.id}">Rejeter</button>
-                        <button class="btn btn-sm btn-warning" data-admin-action="warn-report" data-id="${report.id}">Avertir</button>
-                        <button class="btn btn-sm btn-danger" data-admin-action="ban-report" data-id="${report.id}">Bannir</button>
-                    </span>
-                </div>
-            `;
-        });
-
-        html += '</div>';
-        container.innerHTML = html;
     },
 
     // =========================================================================
     // NOTIFICATIONS
     // =========================================================================
-
     async loadNotifications() {
-        const result = await this.api('api/notifications.php');
-        if (result && result.notifications) {
-            this.renderNotifications(result.notifications);
+        try {
+            const data = await this.api('notifications.php?action=list');
+            this.renderNotifications(data?.notifications || []);
+        } catch (err) {
+            // Silently fail
         }
     },
 
-    renderNotifications(notifications) {
-        const container = document.getElementById('notifications-list');
+    renderNotifications(notifs) {
+        const container = document.getElementById('notificationsDropdown');
         if (!container) return;
 
-        if (notifications.length === 0) {
-            container.innerHTML = '<div class="notifications-empty">Aucune notification</div>';
+        if (notifs.length === 0) {
+            container.innerHTML =
+                '<div class="notif-empty"><p>Aucune notification</p></div>';
             return;
         }
 
-        let html = '';
-        notifications.forEach(notif => {
-            html += `
-                <div class="notification-item ${notif.read ? '' : 'notification-unread'}" data-notification-id="${notif.id}">
-                    <div class="notification-content">
-                        <p class="notification-text">${this.escapeHtml(notif.message || notif.content || '')}</p>
-                        <span class="notification-time">${this.timeAgo(new Date(notif.created_at))}</span>
-                    </div>
-                    ${!notif.read ? '<button class="notification-mark-read" data-notif-id="' + notif.id + '">Marquer lu</button>' : ''}
-                </div>
-            `;
-        });
-        container.innerHTML = html;
+        container.innerHTML = notifs
+            .map(n => {
+                const isUnread = !n.is_read;
+                const time = n.created_at
+                    ? this.timeAgo(new Date(n.created_at))
+                    : '';
 
-        // Mark as read handlers
-        container.querySelectorAll('.notification-mark-read').forEach(btn => {
-            btn.addEventListener('click', e => {
-                e.stopPropagation();
-                this.markNotificationRead(parseInt(btn.dataset.notifId, 10));
-                const item = btn.closest('.notification-item');
-                if (item) item.classList.remove('notification-unread');
-                btn.remove();
+                return `<div class="notification-item ${isUnread ? 'unread' : ''}"
+                    onclick="App.handleNotificationClick(${n.id}, ${n.group_id || 'null'}, ${n.message_id || 'null'})">
+                    <div class="notif-content">
+                        <div class="notif-title">${this.escapeHtml(n.title || '')}</div>
+                        <div class="notif-body">${this.escapeHtml(n.body || '')}</div>
+                        <div class="notif-time">${time}</div>
+                    </div>
+                    ${isUnread ? '<div class="notif-dot"></div>' : ''}
+                </div>`;
+            })
+            .join('');
+
+        // Add "mark all as read" button
+        const hasUnread = notifs.some(n => !n.is_read);
+        if (hasUnread) {
+            container.insertAdjacentHTML(
+                'beforeend',
+                '<div class="notif-footer"><button class="btn btn-sm btn-outline" onclick="App.markAllNotificationsRead()">Tout marquer comme lu</button></div>'
+            );
+        }
+    },
+
+    async handleNotificationClick(notifId, groupId, messageId) {
+        // Mark as read
+        try {
+            await this.api('notifications.php?action=read', {
+                method: 'POST',
+                body: { notification_id: notifId },
             });
-        });
-    },
-
-    async markNotificationRead(id) {
-        await this.api('api/notifications.php', {
-            method: 'POST',
-            body: { notification_id: id, action: 'read' }
-        });
-    },
-
-    getUnreadCount() {
-        let total = 0;
-        for (const gId in this.state.unreadCounts) {
-            total += this.state.unreadCounts[gId] || 0;
-        }
-        return total;
-    },
-
-    async requestPushPermission() {
-        if (!('Notification' in window)) {
-            this.showToast('Les notifications ne sont pas supportées par ce navigateur', 'warning');
-            return;
+        } catch (err) {
+            // Continue anyway
         }
 
-        const permission = await Notification.requestPermission();
-        if (permission === 'granted') {
-            this.showToast('Notifications activées', 'success');
-
-            // Subscribe to push if service worker available
-            if ('serviceWorker' in navigator && 'PushManager' in window) {
-                try {
-                    const registration = await navigator.serviceWorker.ready;
-                    const subscription = await registration.pushManager.subscribe({
-                        userVisibleOnly: true,
-                        applicationServerKey: this.urlBase64ToUint8Array(
-                            document.querySelector('meta[name="vapid-public-key"]')?.getAttribute('content') || ''
-                        )
-                    });
-
-                    // Send subscription to server
-                    await this.api('api/notifications.php?action=subscribe', {
-                        method: 'POST',
-                        body: { subscription: JSON.stringify(subscription) }
-                    });
-                } catch (err) {
-                    console.error('Push subscription failed:', err);
-                }
+        // Navigate
+        this.toggleNotifications();
+        if (groupId) {
+            await this.openGroup(groupId);
+            if (messageId) {
+                setTimeout(() => this.scrollToMessage(messageId), 500);
             }
-        } else if (permission === 'denied') {
-            this.showToast('Notifications bloquées. Vérifiez les paramètres du navigateur.', 'warning');
         }
     },
 
-    urlBase64ToUint8Array(base64String) {
-        const padding = '='.repeat((4 - base64String.length % 4) % 4);
-        const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-        const rawData = window.atob(base64);
-        const outputArray = new Uint8Array(rawData.length);
-        for (let i = 0; i < rawData.length; i++) {
-            outputArray[i] = rawData.charCodeAt(i);
-        }
-        return outputArray;
-    },
-
-    // =========================================================================
-    // ANONYMIZATION
-    // =========================================================================
-
-    showAnonymizationConfirmation() {
-        let modal = document.getElementById('anonymization-modal');
-        if (!modal) {
-            modal = document.createElement('div');
-            modal.id = 'anonymization-modal';
-            modal.className = 'modal';
-            modal.innerHTML = `
-                <div class="modal-overlay modal-close"></div>
-                <div class="modal-dialog">
-                    <div class="modal-header">
-                        <h3>Rappel important</h3>
-                        <button class="modal-close">&times;</button>
-                    </div>
-                    <div class="modal-body">
-                        <div class="anonymization-warning">
-                            <div class="anonymization-icon">⚠️</div>
-                            <h4>Anonymisation des données cliniques</h4>
-                            <p>Avant de partager un cas clinique, veuillez vous assurer que toutes les données permettant d'identifier le patient ont été retirées ou modifiées :</p>
-                            <ul>
-                                <li>Nom et prénom du patient</li>
-                                <li>Date de naissance exacte</li>
-                                <li>Numéro de dossier</li>
-                                <li>Adresse et téléphone</li>
-                                <li>Tout élément d'identification sur les images</li>
-                            </ul>
-                            <p><strong>En publiant dans ce groupe, vous confirmez que les données sont anonymisées.</strong></p>
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button class="btn btn-primary anonymization-confirm">J'ai compris et je confirme</button>
-                    </div>
-                </div>
-            `;
-            document.body.appendChild(modal);
-
-            modal.querySelector('.anonymization-confirm')?.addEventListener('click', () => {
-                this.hideModal('anonymization-modal');
+    async markAllNotificationsRead() {
+        try {
+            await this.api('notifications.php?action=read-all', {
+                method: 'POST',
             });
+            this.loadNotifications();
+            this.showToast('Notifications marquées comme lues', 'success');
+        } catch (err) {
+            this.showToast(err.message, 'error');
         }
-
-        this.showModal('anonymization-modal');
     },
 
-    // =========================================================================
-    // @MENTION AUTOCOMPLETE
-    // =========================================================================
+    toggleNotifications() {
+        const dd = document.getElementById('notificationsDropdown');
+        if (!dd) return;
 
-    handleMentionAutocomplete(textarea) {
-        const text = textarea.value;
-        const cursorPos = textarea.selectionStart;
-
-        // Find @ before cursor
-        let atPos = -1;
-        for (let i = cursorPos - 1; i >= 0; i--) {
-            if (text[i] === '@') {
-                atPos = i;
-                break;
-            }
-            if (text[i] === ' ' || text[i] === '\n') {
-                break;
-            }
-        }
-
-        if (atPos === -1) {
-            this.hideMentionDropdown();
-            return;
-        }
-
-        const query = text.substring(atPos + 1, cursorPos).toLowerCase();
-        this.state.composerMentionStart = atPos;
-
-        if (query.length === 0) {
-            // Show all cached members
-            this.showMentionDropdown(this.state.membersCache.slice(0, 10), textarea);
-            return;
-        }
-
-        // Filter members
-        const filtered = this.state.membersCache.filter(m => {
-            const fullName = `${m.first_name || ''} ${m.last_name || ''}`.toLowerCase();
-            return fullName.includes(query);
-        }).slice(0, 8);
-
-        if (filtered.length > 0) {
-            this.showMentionDropdown(filtered, textarea);
+        const isVisible = !dd.classList.contains('hidden');
+        if (isVisible) {
+            dd.classList.add('hidden');
         } else {
-            // Fetch from server
-            this.api(`api/members.php?search=${encodeURIComponent(query)}&limit=8`).then(result => {
-                if (result && result.members) {
-                    this.showMentionDropdown(result.members, textarea);
-                }
-            });
+            dd.classList.remove('hidden');
+            this.loadNotifications();
         }
     },
 
-    showMentionDropdown(members, textarea) {
-        let dropdown = document.getElementById('mention-dropdown');
-        if (!dropdown) {
-            dropdown = document.createElement('div');
-            dropdown.id = 'mention-dropdown';
-            dropdown.className = 'mention-dropdown';
-            dropdown.style.cssText = `
-                position:absolute;z-index:9999;background:#fff;border:1px solid #ddd;
-                border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.12);max-height:200px;
-                overflow-y:auto;min-width:200px;
-            `;
-            const composerContainer = textarea.closest('.composer-container') || textarea.parentElement;
-            if (composerContainer) {
-                composerContainer.style.position = 'relative';
-                composerContainer.appendChild(dropdown);
-            } else {
-                document.body.appendChild(dropdown);
+    // =========================================================================
+    // MODALS
+    // =========================================================================
+    showModal(modalId) {
+        const modal = document.getElementById(modalId);
+        if (modal) {
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
+            // Focus first input
+            const firstInput = modal.querySelector(
+                'input:not([type="hidden"]):not([type="file"]), textarea, select'
+            );
+            if (firstInput) {
+                setTimeout(() => firstInput.focus(), 100);
             }
         }
+    },
 
-        if (members.length === 0) {
-            this.hideMentionDropdown();
+    hideModal(modalId) {
+        const modal = document.getElementById(modalId);
+        if (modal) {
+            modal.classList.remove('active');
+            document.body.style.overflow = '';
+        }
+    },
+
+    hideAllModals() {
+        document.querySelectorAll('.modal-overlay').forEach(m => {
+            m.classList.remove('active');
+        });
+        document.body.style.overflow = '';
+    },
+
+    showReportModal(msgId) {
+        this.state.reportingMessageId = msgId;
+        const reasonSelect = document.getElementById('reportReason');
+        const commentArea = document.getElementById('reportComment');
+        if (reasonSelect) reasonSelect.value = '';
+        if (commentArea) commentArea.value = '';
+        this.showModal('reportModal');
+    },
+
+    async submitReport() {
+        const reason = document.getElementById('reportReason')?.value;
+        const comment = document.getElementById('reportComment')?.value || '';
+
+        if (!reason) {
+            this.showToast('Veuillez sélectionner un motif', 'error');
             return;
         }
 
-        let html = '';
-        members.forEach(m => {
-            const name = `${m.first_name || ''} ${m.last_name || ''}`.trim();
-            const username = m.username || name.replace(/\s+/g, '.').toLowerCase();
-            const avatar = m.photo_url
-                ? `<img src="${this.escapeHtml(m.photo_url)}" class="mention-avatar" style="width:28px;height:28px;border-radius:50%;object-fit:cover;">`
-                : `<img src="${this.generateInitialsAvatar(name)}" class="mention-avatar" style="width:28px;height:28px;border-radius:50%;">`;
+        try {
+            await this.api('messages.php?action=report', {
+                method: 'POST',
+                body: {
+                    message_id: this.state.reportingMessageId,
+                    reason: reason,
+                    comment: comment,
+                },
+            });
+            this.showToast('Message signalé aux administrateurs', 'success');
+            this.hideModal('reportModal');
+        } catch (err) {
+            this.showToast(err.message, 'error');
+        }
+    },
 
-            html += `
-                <div class="mention-item" data-username="${this.escapeHtml(username)}" data-display-name="${this.escapeHtml(name)}" style="
-                    display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;
-                " onmouseover="this.style.background='#f0f0f0'" onmouseout="this.style.background='transparent'">
-                    ${avatar}
-                    <span class="mention-name" style="font-size:14px;">${this.escapeHtml(name)}</span>
-                </div>
-            `;
+    showAnonymizationConfirmation(callback) {
+        this.state.anonCallback = callback;
+        const modal = document.getElementById('anonModal');
+        if (modal) {
+            // Set up confirm button handler
+            const confirmBtn = modal.querySelector('.confirm-anon');
+            if (confirmBtn) {
+                confirmBtn.onclick = () => this.acceptAnonymization();
+            }
+            const cancelBtn = modal.querySelector('.cancel-anon');
+            if (cancelBtn) {
+                cancelBtn.onclick = () => this.hideModal('anonModal');
+            }
+        }
+        this.showModal('anonModal');
+    },
+
+    acceptAnonymization() {
+        this.state.anonAccepted = true;
+        this.hideModal('anonModal');
+        if (typeof this.state.anonCallback === 'function') {
+            this.state.anonCallback();
+            this.state.anonCallback = null;
+        }
+    },
+
+    // =========================================================================
+    // UI HELPERS
+    // =========================================================================
+    showToast(message, type = 'info') {
+        // Remove existing toasts
+        document.querySelectorAll('.toast').forEach(t => {
+            t.classList.remove('show');
+            setTimeout(() => t.remove(), 300);
         });
 
-        dropdown.innerHTML = html;
-        dropdown.style.display = 'block';
-        dropdown.style.bottom = (textarea.offsetHeight + 4) + 'px';
-        dropdown.style.left = '0';
+        const toast = document.createElement('div');
+        toast.className = `toast toast-${type}`;
 
-        this.state.mentionDropdownVisible = true;
+        const icons = { success: '✓', error: '✕', info: 'ℹ', warning: '⚠' };
+        const icon = icons[type] || icons.info;
+
+        toast.innerHTML = `<span class="toast-icon">${icon}</span><span class="toast-message">${this.escapeHtml(message)}</span>`;
+        document.body.appendChild(toast);
+
+        // Trigger animation
+        requestAnimationFrame(() => {
+            toast.classList.add('show');
+        });
+
+        // Auto dismiss
+        const duration = type === 'error' ? 5000 : 3000;
+        setTimeout(() => {
+            toast.classList.remove('show');
+            setTimeout(() => toast.remove(), 300);
+        }, duration);
     },
 
-    hideMentionDropdown() {
-        const dropdown = document.getElementById('mention-dropdown');
-        if (dropdown) {
-            dropdown.style.display = 'none';
+    updateUserUI() {
+        if (!this.state.user) return;
+
+        // Update topbar user button/avatar
+        const userBtn = document.getElementById('userMenuBtn');
+        if (userBtn) {
+            const initials = (
+                (this.state.user.first_name?.[0] || '') +
+                (this.state.user.last_name?.[0] || '')
+            ).toUpperCase();
+
+            if (this.state.user.profile_photo) {
+                userBtn.innerHTML = `<img src="/connect/${this.escapeHtml(this.state.user.profile_photo)}" alt="${initials}" class="topbar-avatar">`;
+            } else {
+                userBtn.textContent = initials;
+            }
         }
-        this.state.mentionDropdownVisible = false;
+
+        // Update user name display
+        const userNameEl = document.getElementById('userName');
+        if (userNameEl) {
+            userNameEl.textContent = (this.state.user.first_name || '') + ' ' + (this.state.user.last_name || '');
+        }
+
+        // Show/hide admin link
+        const adminLink = document.getElementById('adminLink');
+        if (adminLink) {
+            adminLink.classList.toggle('hidden', !this.isAdmin());
+        }
+
+        // Show/hide admin tab on mobile
+        const adminTab = document.querySelector('.mobile-tab[data-view="admin"]');
+        if (adminTab) {
+            adminTab.classList.toggle('hidden', !this.isAdmin());
+        }
     },
 
-    insertMention(username, displayName) {
-        const composer = document.getElementById('message-composer');
-        if (!composer) return;
+    goBack() {
+        if (this.state.isMobile) {
+            document.getElementById('sidebar')?.classList.remove('hidden');
+            document.getElementById('mainContent')?.classList.add('hidden');
+        }
+    },
 
-        const text = composer.value;
-        const atPos = this.state.composerMentionStart;
-        const cursorPos = composer.selectionStart;
+    showLoading(container) {
+        if (typeof container === 'string') {
+            container = document.getElementById(container);
+        }
+        if (container) {
+            container.innerHTML =
+                '<div class="loading-spinner"><div class="spinner"></div></div>';
+        }
+    },
 
-        const before = text.substring(0, atPos);
-        const after = text.substring(cursorPos);
-        const mention = `@${username} `;
-
-        composer.value = before + mention + after;
-        composer.selectionStart = composer.selectionEnd = before.length + mention.length;
-        composer.focus();
-
-        this.hideMentionDropdown();
+    hideLoading(container) {
+        if (typeof container === 'string') {
+            container = document.getElementById(container);
+        }
+        if (container) {
+            const spinner = container.querySelector('.loading-spinner');
+            if (spinner) spinner.remove();
+        }
     },
 
     // =========================================================================
-    // UTILS
+    // UTILITIES
     // =========================================================================
-
-    formatTime(date) {
-        if (!(date instanceof Date) || isNaN(date)) return '';
-        const h = String(date.getHours()).padStart(2, '0');
-        const m = String(date.getMinutes()).padStart(2, '0');
-        return `${h}:${m}`;
-    },
-
-    formatDate(date) {
-        if (!(date instanceof Date) || isNaN(date)) return '';
-        const d = String(date.getDate()).padStart(2, '0');
-        const mo = String(date.getMonth() + 1).padStart(2, '0');
-        const y = date.getFullYear();
-        return `${d}/${mo}/${y}`;
-    },
-
-    timeAgo(date) {
-        if (!(date instanceof Date) || isNaN(date)) return '';
-        const now = new Date();
-        const diffMs = now - date;
-        const diffSec = Math.floor(diffMs / 1000);
-        const diffMin = Math.floor(diffSec / 60);
-        const diffH = Math.floor(diffMin / 60);
-        const diffD = Math.floor(diffH / 24);
-
-        if (diffSec < 30) return 'à l\'instant';
-        if (diffSec < 60) return `il y a ${diffSec}s`;
-        if (diffMin < 60) return `il y a ${diffMin} min`;
-        if (diffH < 24) return `il y a ${diffH}h`;
-        if (diffD === 1) return 'hier';
-        if (diffD < 7) return `il y a ${diffD}j`;
-        if (diffD < 30) {
-            const weeks = Math.floor(diffD / 7);
-            return `il y a ${weeks} sem.`;
-        }
-        if (diffD < 365) {
-            const months = Math.floor(diffD / 30);
-            return `il y a ${months} mois`;
-        }
-        const years = Math.floor(diffD / 365);
-        return `il y a ${years} an${years > 1 ? 's' : ''}`;
-    },
-
     escapeHtml(str) {
         if (str === null || str === undefined) return '';
         const s = String(str);
-        const map = {
-            '&': '&amp;',
-            '<': '&lt;',
-            '>': '&gt;',
-            '"': '&quot;',
-            "'": '&#039;'
-        };
-        return s.replace(/[&<>"']/g, c => map[c]);
+        const div = document.createElement('div');
+        div.textContent = s;
+        return div.innerHTML;
+    },
+
+    linkify(text) {
+        if (!text) return '';
+        // URLs
+        text = text.replace(
+            /(https?:\/\/[^\s<>"']+)/g,
+            '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
+        );
+        // Email addresses
+        text = text.replace(
+            /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g,
+            '<a href="mailto:$1">$1</a>'
+        );
+        // Newlines to <br>
+        text = text.replace(/\n/g, '<br>');
+        return text;
+    },
+
+    formatTime(date) {
+        if (!(date instanceof Date) || isNaN(date.getTime())) return '';
+        return date.toLocaleTimeString('fr-FR', {
+            hour: '2-digit',
+            minute: '2-digit',
+        });
+    },
+
+    formatDate(date) {
+        if (!(date instanceof Date) || isNaN(date.getTime())) return '';
+        const today = new Date();
+        const yesterday = new Date(today);
+        yesterday.setDate(yesterday.getDate() - 1);
+
+        if (date.toDateString() === today.toDateString()) {
+            return "Aujourd'hui";
+        }
+        if (date.toDateString() === yesterday.toDateString()) {
+            return 'Hier';
+        }
+        return date.toLocaleDateString('fr-FR', {
+            day: 'numeric',
+            month: 'long',
+            year: date.getFullYear() !== today.getFullYear() ? 'numeric' : undefined,
+        });
+    },
+
+    formatDateTime(date) {
+        if (!(date instanceof Date) || isNaN(date.getTime())) return '';
+        return (
+            this.formatDate(date) +
+            ' à ' +
+            this.formatTime(date)
+        );
+    },
+
+    timeAgo(date) {
+        if (!(date instanceof Date) || isNaN(date.getTime())) return '';
+        const seconds = Math.floor((new Date() - date) / 1000);
+
+        if (seconds < 30) return "à l'instant";
+        if (seconds < 60) return `il y a ${seconds}s`;
+
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) return `il y a ${minutes} min`;
+
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) return `il y a ${hours}h`;
+
+        const days = Math.floor(hours / 24);
+        if (days === 1) return 'hier';
+        if (days < 7) return `il y a ${days}j`;
+
+        const weeks = Math.floor(days / 7);
+        if (weeks < 4) return `il y a ${weeks} sem.`;
+
+        return this.formatDate(date);
     },
 
     formatFileSize(bytes) {
-        if (!bytes || bytes === 0) return '0 B';
-        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        if (!bytes || bytes === 0) return '0 o';
+        const sizes = ['o', 'Ko', 'Mo', 'Go', 'To'];
         const i = Math.floor(Math.log(bytes) / Math.log(1024));
-        const size = (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0);
-        return `${size} ${units[i]}`;
+        const val = bytes / Math.pow(1024, i);
+        return (i === 0 ? val : val.toFixed(1)) + ' ' + sizes[i];
+    },
+
+    getFileIcon(mimeType) {
+        if (!mimeType) return '📄';
+        const type = mimeType.toLowerCase();
+        if (type.includes('pdf')) return '📕';
+        if (type.includes('word') || type.includes('document') || type.includes('docx') || type.includes('doc')) return '📘';
+        if (type.includes('presentation') || type.includes('powerpoint') || type.includes('pptx') || type.includes('ppt')) return '📙';
+        if (type.includes('spreadsheet') || type.includes('excel') || type.includes('xlsx') || type.includes('xls') || type.includes('csv')) return '📗';
+        if (type.includes('image') || type.includes('png') || type.includes('jpg') || type.includes('jpeg') || type.includes('gif')) return '🖼';
+        if (type.includes('video') || type.includes('mp4') || type.includes('avi') || type.includes('mov')) return '🎬';
+        if (type.includes('audio') || type.includes('mp3') || type.includes('wav')) return '🎵';
+        if (type.includes('zip') || type.includes('rar') || type.includes('tar') || type.includes('compressed') || type.includes('archive')) return '📦';
+        if (type.includes('text') || type.includes('txt')) return '📝';
+        if (type.includes('html') || type.includes('css') || type.includes('javascript') || type.includes('json')) return '💻';
+        return '📄';
+    },
+
+    truncate(str, maxLength) {
+        if (!str) return '';
+        if (str.length <= maxLength) return str;
+        return str.substring(0, maxLength) + '...';
     },
 
     debounce(fn, ms) {
-        let timer = null;
-        return function (...args) {
+        let timer;
+        return (...args) => {
             clearTimeout(timer);
             timer = setTimeout(() => fn.apply(this, args), ms);
         };
     },
 
-    generateInitialsAvatar(name) {
-        if (!name) name = '?';
-        const parts = name.trim().split(/\s+/);
-        let initials = '';
-        if (parts.length >= 2) {
-            initials = (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-        } else {
-            initials = parts[0].substring(0, 2).toUpperCase();
-        }
-
-        const color = this.hashColor(name);
-        const svg = `
-            <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-                <circle cx="40" cy="40" r="40" fill="${color}"/>
-                <text x="40" y="40" text-anchor="middle" dy="0.35em" fill="#fff"
-                    font-family="Arial, sans-serif" font-size="28" font-weight="600">
-                    ${this.escapeHtml(initials)}
-                </text>
-            </svg>
-        `;
-        return 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
+    throttle(fn, ms) {
+        let lastCall = 0;
+        return (...args) => {
+            const now = Date.now();
+            if (now - lastCall >= ms) {
+                lastCall = now;
+                fn.apply(this, args);
+            }
+        };
     },
 
-    hashColor(str) {
-        const colors = [
-            '#e74c3c', '#3498db', '#2ecc71', '#9b59b6', '#f39c12',
-            '#1abc9c', '#e67e22', '#34495e', '#16a085', '#c0392b',
-            '#8e44ad', '#2980b9', '#27ae60', '#d35400', '#2c3e50',
-            '#7f8c8d', '#f1c40f', '#e91e63', '#00bcd4', '#ff5722'
-        ];
-        let hash = 0;
-        for (let i = 0; i < (str || '').length; i++) {
-            hash = str.charCodeAt(i) + ((hash << 5) - hash);
-            hash = hash & hash;
+    generateTempId() {
+        return 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    },
+
+    copyToClipboard(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(() => {
+                this.showToast('Copié dans le presse-papier', 'success');
+            }).catch(() => {
+                this.fallbackCopyToClipboard(text);
+            });
+        } else {
+            this.fallbackCopyToClipboard(text);
         }
-        return colors[Math.abs(hash) % colors.length];
-    }
+    },
+
+    fallbackCopyToClipboard(text) {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+            document.execCommand('copy');
+            this.showToast('Copié dans le presse-papier', 'success');
+        } catch (err) {
+            this.showToast('Impossible de copier', 'error');
+        }
+        textarea.remove();
+    },
+
+    // =========================================================================
+    // PWA / SERVICE WORKER
+    // =========================================================================
+    registerServiceWorker() {
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker
+                .register('/connect/sw.js')
+                .then(registration => {
+                    // Check for updates periodically
+                    setInterval(() => {
+                        registration.update();
+                    }, 60 * 60 * 1000); // Every hour
+                })
+                .catch(err => {
+                    // Service worker registration failed - not critical
+                });
+        }
+    },
+
+    requestNotificationPermission() {
+        if ('Notification' in window && Notification.permission === 'default') {
+            // Don't request immediately, wait for user interaction
+            const requestOnInteraction = () => {
+                Notification.requestPermission().then(permission => {
+                    if (permission === 'granted') {
+                        this.subscribeToPushNotifications();
+                    }
+                });
+                document.removeEventListener('click', requestOnInteraction);
+            };
+            // Request after first user interaction with the app
+            setTimeout(() => {
+                document.addEventListener('click', requestOnInteraction, { once: true });
+            }, 5000);
+        } else if ('Notification' in window && Notification.permission === 'granted') {
+            this.subscribeToPushNotifications();
+        }
+    },
+
+    async subscribeToPushNotifications() {
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+
+        try {
+            const registration = await navigator.serviceWorker.ready;
+            const subscription = await registration.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: this.urlBase64ToUint8Array(
+                    // This would be the VAPID public key from the server
+                    document.querySelector('meta[name="vapid-key"]')?.content || ''
+                ),
+            });
+
+            // Send subscription to server
+            await this.api('notifications.php?action=subscribe', {
+                method: 'POST',
+                body: { subscription: JSON.stringify(subscription) },
+            });
+        } catch (err) {
+            // Push subscription failed - not critical
+        }
+    },
+
+    urlBase64ToUint8Array(base64String) {
+        if (!base64String) return new Uint8Array(0);
+        const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+        const base64 = (base64String + padding)
+            .replace(/-/g, '+')
+            .replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        const outputArray = new Uint8Array(rawData.length);
+        for (let i = 0; i < rawData.length; ++i) {
+            outputArray[i] = rawData.charCodeAt(i);
+        }
+        return outputArray;
+    },
 };
 
 // =========================================================================
-// BOOTSTRAP
+// Initialize on DOM ready
 // =========================================================================
-
 document.addEventListener('DOMContentLoaded', () => {
-    NadarConnect.init();
+    App.init();
+});
+
+// Handle PWA install prompt
+window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    const installBtn = document.getElementById('installBtn');
+    if (installBtn) {
+        installBtn.classList.remove('hidden');
+        installBtn.addEventListener('click', () => {
+            e.prompt();
+            e.userChoice.then(choice => {
+                if (choice.outcome === 'accepted') {
+                    installBtn.classList.add('hidden');
+                }
+            });
+        });
+    }
+});
+
+// Handle network status
+window.addEventListener('online', () => {
+    App.showToast('Connexion rétablie', 'success');
+    if (App.state.user && App.state.user.role !== 'pending') {
+        App.startPolling();
+    }
+});
+
+window.addEventListener('offline', () => {
+    App.showToast('Connexion perdue', 'warning');
+    App.stopPolling();
 });

@@ -1,11 +1,6 @@
 RewriteEngine On
 RewriteBase /connect/
 
-# Force HTTPS (skip if already behind SSL proxy)
-RewriteCond %{HTTPS} off
-RewriteCond %{HTTP:X-Forwarded-Proto} !https
-RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
-
 # Protect uploads
 RewriteRule ^uploads/(.*)$ api/serve-file.php?path=$1 [L,QSA]
 

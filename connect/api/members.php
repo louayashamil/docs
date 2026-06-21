@@ -19,7 +19,6 @@ switch ($action) {
         break;
     case 'update':
         if ($method !== 'PUT' && $method !== 'POST') jsonResponse(['error' => 'Method not allowed'], 405);
-        requireCsrf();
         updateMember();
         break;
     case 'photo':
@@ -100,8 +99,15 @@ function updateMember(): void
 {
     requireLogin();
     $user = getCurrentUser();
-    $data = getInputJSON();
-    $id = (int)($_GET['id'] ?? $data['id'] ?? 0);
+
+    $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+    if (strpos($contentType, 'multipart/form-data') !== false || strpos($contentType, 'application/x-www-form-urlencoded') !== false) {
+        $data = $_POST;
+    } else {
+        $data = getInputJSON();
+    }
+
+    $id = (int)($_GET['id'] ?? $data['id'] ?? $user['id']);
 
     if ($id <= 0) jsonResponse(['error' => 'ID invalide'], 400);
     if ((int)$user['id'] !== $id && !in_array($user['role'], ['super_admin', 'admin'])) {
@@ -109,7 +115,7 @@ function updateMember(): void
     }
 
     $db = Database::getInstance();
-    $allowed = ['first_name', 'last_name', 'phone', 'city', 'institution'];
+    $allowed = ['first_name', 'last_name', 'email', 'phone', 'city', 'institution'];
     $fields = [];
     $params = [];
 

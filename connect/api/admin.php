@@ -66,7 +66,7 @@ function listPending(): void
     $db = Database::getInstance();
     $stmt = $db->prepare("SELECT id, first_name, last_name, email, phone, city, institution, created_at FROM users WHERE role = 'pending' OR status = 'pending' ORDER BY created_at DESC");
     $stmt->execute();
-    jsonResponse(['pending' => $stmt->fetchAll()]);
+    jsonResponse(['members' => $stmt->fetchAll()]);
 }
 
 function approveUser(): void
@@ -228,10 +228,10 @@ function getStats(): void
     $stats = [];
 
     $stmt = $db->query("SELECT COUNT(*) FROM users WHERE status = 'active'");
-    $stats['active_users'] = (int)$stmt->fetchColumn();
+    $stats['total_members'] = (int)$stmt->fetchColumn();
 
     $stmt = $db->query("SELECT COUNT(*) FROM users WHERE role = 'pending' OR status = 'pending'");
-    $stats['pending_users'] = (int)$stmt->fetchColumn();
+    $stats['pending_members'] = (int)$stmt->fetchColumn();
 
     $stmt = $db->query("SELECT COUNT(*) FROM messages WHERE status = 'active'");
     $stats['total_messages'] = (int)$stmt->fetchColumn();

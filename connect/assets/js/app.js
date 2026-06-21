@@ -283,15 +283,15 @@ const App = {
     // =========================================================================
     async checkAuth() {
         try {
-            const data = await this.api('auth.php?action=check');
-            if (data.authenticated && data.user) {
+            const data = await this.api('auth.php?action=me');
+            if (data && data.user) {
                 this.state.user = data.user;
-                if (data.user.status === 'pending') {
+                if (data.user.role === 'pending') {
                     this.showWaiting();
-                } else if (data.user.status === 'active') {
-                    this.showApp();
-                } else {
+                } else if (data.user.role === 'suspended') {
                     this.showLanding();
+                } else {
+                    this.showApp();
                 }
             } else {
                 this.showLanding();
@@ -327,12 +327,12 @@ const App = {
                 this.hideModal('loginModal');
                 form.reset();
 
-                if (data.user.status === 'pending') {
+                if (data.user.role === 'pending') {
                     this.showWaiting();
-                } else if (data.user.status === 'active') {
-                    this.showApp();
-                } else {
+                } else if (data.user.role === 'suspended') {
                     this.showToast('Votre compte a été suspendu.', 'error');
+                } else {
+                    this.showApp();
                 }
             } else {
                 this.showToast(data.error || 'Identifiants incorrects.', 'error');
